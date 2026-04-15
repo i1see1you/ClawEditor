@@ -1,0 +1,175 @@
+import {
+  applyReplaceAll,
+  applyReplaceRegex,
+  applyDeleteLiteral,
+  applyLineOp,
+  applyCaseOp,
+  type DocSelectionNullable,
+} from '../utils/documentOps'
+import { SUPPORTED_INTENT_PROTOCOL_VERSION, type EditorIntentV1, type IntentScope } from './intentTypes'
+
+export type ApplyIntentResult =
+  | { kind: 'edit'; newText: string; summary: string; title: string }
+  | { kind: 'goto'; line: number }
+  | { kind: 'clarify'; message: string }
+  | { kind: 'noop' }
+  | { kind: 'error'; message: string }
+
+type ResolvedScope =
+  | { ok: true; range: 'file' | 'selection' }
+  | { ok: false; message: string }
+
+function resolveScope(scope: IntentScope | undefined, sel: DocSelectionNullable): ResolvedScope {
+  const s = scope ?? 'auto'
+  if (s === 'auto') {
+    return { ok: true, range: sel && sel.from !== sel.to ? 'selection' : 'file' }
+  }
+  if (s === 'file') return { ok: true, range: 'file' }
+  if (s === 'selection') {
+    if (!sel || sel.from === sel.to) {
+      return { ok: false, message: '意图要求选区，但当前没有选中文本。' }
+    }
+    return { ok: true, range: 'selection' }
+  }
+  if (s === 'lines') {
+    return {
+      ok: false,
+      message: 'scope "lines" 尚未支持，请使用 auto/file/selection。',
+    }
+  }
+  return { ok: true, range: 'file' }
+}
+
+function selForResolved(
+  range: 'file' | 'selection',
+  sel: DocSelectionNullable
+): DocSelectionNullable {
+  if (range === 'selection') return sel
+  return null
+}
+
+export function applyParsedIntent(
+  fileText: string,
+  selection: DocSelectionNullable,
+  version: number,
+  raw: unknown
+): ApplyIntentResult {
+  if (version > SUPPORTED_INTENT_PROTOCOL_VERSION) {
+    return {
+      kind: 'error',
+      message: `不支持的意图协议版本 ${version}（客户端最高 ${SUPPORTED_INTENT_PROTOCOL_VERSION}），请升级应用。`,
+    }
+  }
+  if (version < 1 || !Number.isFinite(version)) {
+    return { kind: 'error', message: '缺少或无效的 version 字段。' }
+  }
+
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { kind: 'error', message: 'intent 必须是 JSON 对象。' }
+  }
+
+  const intent = raw as EditorIntentV1
+  const op = intent.op
+  if (typeof op !== 'string') {
+    return { kind: 'error', message: '缺少 op 字段。' }
+  }
+
+  const resolved = resolveScope(intent.scope, selection)
+  if (!resolved.ok) {
+    return { kind: 'error', message: resolved.message }
+  }
+  const effSel = selForResolved(resolved.range, selection)
+
+  switch (op) {
+    case 'replace_all': {
+      const from = intent.from
+      const to = intent.to ?? ''
+      if (typeof from !== 'string' || !from) {
+        return { kind: 'error', message: 'replace_all 需要非空字符串 from。' }
+      }
+      const r = applyReplaceAll(fileText, effSel, from, to, 'intent:replace_all')
+      if (!r) return { kind: 'error', message: 'replace_all 参数无效。' }
+      return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
+    }
+    case 'replace_regex': {
+      const pattern = intent.pattern
+      const flags = intent.flags
+      const replacement = intent.replacement ?? ''
+      if (typeof pattern !== 'string' || !pattern) {
+        return { kind: 'error', message: 'replace_regex 需要非空字符串 pattern。' }
+      }
+      if (flags !== undefined && typeof flags !== 'string') {
+        return { kind: 'error', message: 'replace_regex 的 flags 必须是字符串。' }
+      }
+      if (intent.replacement !== undefined && typeof intent.replacement !== 'string') {
+        return { kind: 'error', message: 'replace_regex 的 replacement 必须是字符串。' }
+      }
+      const r = applyReplaceRegex(
+        fileText,
+        effSel,
+        pattern,
+        flags,
+        replacement,
+        'intent:replace_regex'
+      )
+      if (!r) return { kind: 'error', message: 'replace_regex 参数无效或正则不合法。' }
+      return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
+    }
+    case 'delete_literal': {
+      const needle = intent.needle
+      if (typeof needle !== 'string' || !needle) {
+        return { kind: 'error', message: 'delete_literal 需要 needle。' }
+      }
+      const r = applyDeleteLiteral(fileText, effSel, needle, 'intent:delete')
+      if (!r) return { kind: 'error', message: 'delete_literal 参数无效。' }
+      return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
+    }
+    case 'remove_empty_lines': {
+      const r = applyLineOp(fileText, effSel, 'empty', '删除空行')
+      return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
+    }
+    case 'remove_blank_lines': {
+      const r = applyLineOp(fileText, effSel, 'blank', '删除空白行')
+      return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
+    }
+    case 'trim_trailing': {
+      const r = applyLineOp(fileText, effSel, 'trim', '去除行尾空格')
+      return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
+    }
+    case 'sort_lines': {
+      const r = applyLineOp(fileText, effSel, 'sort', '排序行')
+      return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
+    }
+    case 'dedupe_lines': {
+      const r = applyLineOp(fileText, effSel, 'dedupe', '去重行')
+      return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
+    }
+    case 'case_upper': {
+      const r = applyCaseOp(fileText, effSel, 'up', '转大写')
+      return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
+    }
+    case 'case_lower': {
+      const r = applyCaseOp(fileText, effSel, 'low', '转小写')
+      return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
+    }
+    case 'case_title': {
+      const r = applyCaseOp(fileText, effSel, 'title', '首字母大写')
+      return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
+    }
+    case 'goto_line': {
+      const line = intent.line
+      if (typeof line !== 'number' || !Number.isInteger(line) || line < 1) {
+        return { kind: 'error', message: 'goto_line 需要正整数 line。' }
+      }
+      return { kind: 'goto', line }
+    }
+    case 'clarify': {
+      const msg = typeof intent.message === 'string' ? intent.message : '需要更多信息。'
+      return { kind: 'clarify', message: msg }
+    }
+    case 'noop':
+      return { kind: 'noop' }
+    default:
+      return { kind: 'error', message: `不支持的 op: ${op}` }
+  }
+}
