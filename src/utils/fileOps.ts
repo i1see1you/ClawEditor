@@ -1,5 +1,5 @@
 import { open, save, message } from '@tauri-apps/plugin-dialog'
-import { readTextFile, readFile } from '@tauri-apps/plugin-fs'
+import { readTextFile, readFile, stat } from '@tauri-apps/plugin-fs'
 import type { FileHandle } from '../types'
 
 function decodeRtfToText(rtfContent: string): string {
@@ -69,6 +69,19 @@ export async function openFile(): Promise<FileHandle | null> {
     return { path, name, content, isPdf: false }
   } catch (err) {
     console.error('Failed to open file:', err)
+    return null
+  }
+}
+
+/** Disk metadata for external-change detection (focus / stat). */
+export async function getFileDiskBaseline(
+  path: string
+): Promise<{ mtimeMs: number; size: number } | null> {
+  try {
+    const info = await stat(path)
+    if (!info.isFile || info.mtime === null) return null
+    return { mtimeMs: info.mtime.getTime(), size: info.size }
+  } catch {
     return null
   }
 }

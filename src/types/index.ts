@@ -10,6 +10,12 @@ export interface FileTab {
   lineCount: number
   fileSize: number
   isPdf: boolean
+  /**
+   * Last known disk metadata when the buffer was aligned with disk (open/save/reload).
+   * Used by focus-time external change detection (mtime + size).
+   */
+  diskMtimeMs?: number
+  diskSize?: number
 }
 
 export interface FileHandle {

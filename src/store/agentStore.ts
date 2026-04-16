@@ -148,6 +148,14 @@ function tryConsumeAiEditProposalFromAssistantMarkdown(
   const extracted = extractDocumentFromAssistantMarkdown(markdown)
   if (!extracted) return null
 
+  // Guard against early extraction of unrelated fenced blocks (e.g. sender metadata).
+  // For /aiedit fallback, require a strong signal that the assistant actually provided the
+  // merged document, otherwise keep waiting for later chunks.
+  const hasStrongMarker = /\bNewText:\s*/.test(markdown) || /\bnewText:\s*\|\s*\n/.test(markdown)
+  if (!hasStrongMarker && extracted.length < Math.max(32, ctx.fileTextSnapshot.length / 3)) {
+    return null
+  }
+
   const newFull = mergeAiEditExtractWithSnapshot(ctx.fileTextSnapshot, ctx, extracted)
   if (newFull === ctx.fileTextSnapshot) return null
 

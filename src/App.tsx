@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
+import { readTextFile } from '@tauri-apps/plugin-fs'
 import { useFileStore } from './store/fileStore'
 import { TabBar } from './components/TabBar'
 import { EditorPanel } from './components/EditorPanel'
@@ -7,10 +8,19 @@ import { StatusBar } from './components/StatusBar'
 import { MenuBar } from './components/MenuBar'
 import { DiffPanel } from './components/DiffPanel'
 import { AgentPanel } from './components/AgentPanel'
+import { ExternalFileChangedDialog } from './components/ExternalFileChangedDialog'
 import { openSearchPanel } from '@codemirror/search'
 import { undo, redo } from '@codemirror/commands'
 import { useEditorStore } from './store/editorStore'
-import { openFile, detectLanguage, notify, pickSavePdfPath, saveBinaryFile, saveFile } from './utils/fileOps'
+import {
+  openFile,
+  detectLanguage,
+  notify,
+  pickSavePdfPath,
+  saveBinaryFile,
+  saveFile,
+  getFileDiskBaseline,
+} from './utils/fileOps'
 import { exportHtmlToPdfBytes } from './utils/exportPdf'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
@@ -22,6 +32,8 @@ function App() {
   const [showDiff, setShowDiff] = useState(false)
   const [showAgent, setShowAgent] = useState(false)
   const agentPanelHeight = 260
+  /** When disk changed while buffer has unsaved edits (focus-time check). */
+  const [externalConflictFileId, setExternalConflictFileId] = useState<string | null>(null)
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
@@ -33,7 +45,7 @@ function App() {
       const content = file.content
       const lineCount = typeof content === 'string' ? content.split('\n').length : 0
       const fileSize = typeof content === 'string' ? content.length : (content as Uint8Array).byteLength
-      useFileStore.getState().addFile({
+      const id = useFileStore.getState().addFile({
         name: file.name,
         path: file.path,
         content: content,
@@ -45,6 +57,10 @@ function App() {
         isPdf: file.isPdf,
         isModified: false,
       })
+      if (!file.isPdf && typeof file.content === 'string' && file.path) {
+        const b = await getFileDiskBaseline(file.path)
+        if (b) useFileStore.getState().setDiskBaseline(id, b.mtimeMs, b.size)
+      }
     }
   }
 
@@ -88,6 +104,84 @@ function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [canAgent])
 
+  const checkExternalChangeOnFocus = useCallback(async () => {
+    const state = useFileStore.getState()
+    const id = state.activeFileId
+    if (!id) return
+    const file = state.files.find((f) => f.id === id)
+    if (!file || file.isPdf || typeof file.content !== 'string' || !file.path) return
+
+    const onDisk = await getFileDiskBaseline(file.path)
+    if (!onDisk) {
+      await notify({
+        title: '无法读取文件',
+        message: '无法在磁盘上访问该文件，可能已被移动或删除。',
+        kind: 'warning',
+      })
+      return
+    }
+
+    const hasBaseline =
+      typeof file.diskMtimeMs === 'number' && typeof file.diskSize === 'number'
+
+    if (!hasBaseline) {
+      useFileStore.getState().setDiskBaseline(id, onDisk.mtimeMs, onDisk.size)
+      return
+    }
+
+    if (onDisk.mtimeMs === file.diskMtimeMs && onDisk.size === file.diskSize) {
+      return
+    }
+
+    if (!file.isModified) {
+      try {
+        const text = await readTextFile(file.path)
+        useFileStore.getState().replaceContentFromDisk(id, text)
+        useFileStore.getState().setDiskBaseline(id, onDisk.mtimeMs, onDisk.size)
+        await notify({
+          title: '已从磁盘更新',
+          message: `「${file.name}」在磁盘上的内容已变更，编辑器已自动加载最新内容。`,
+          kind: 'info',
+        })
+      } catch (e) {
+        await notify({
+          title: '重新加载失败',
+          message: e instanceof Error ? e.message : String(e),
+          kind: 'error',
+        })
+      }
+      return
+    }
+
+    setExternalConflictFileId(id)
+  }, [])
+
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout> | undefined
+    const schedule = () => {
+      if (t) clearTimeout(t)
+      t = setTimeout(() => {
+        void checkExternalChangeOnFocus()
+      }, 320)
+    }
+    const onVis = () => {
+      if (document.visibilityState === 'visible') schedule()
+    }
+    window.addEventListener('focus', schedule)
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      if (t) clearTimeout(t)
+      window.removeEventListener('focus', schedule)
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [checkExternalChangeOnFocus])
+
+  useEffect(() => {
+    if (externalConflictFileId && activeFileId !== externalConflictFileId) {
+      setExternalConflictFileId(null)
+    }
+  }, [activeFileId, externalConflictFileId])
+
   const handleSaveFile = async () => {
     if (!activeFile) return
     if (isPdf) return
@@ -98,6 +192,8 @@ function App() {
     if (ok) {
       useFileStore.getState().setSavedContent(activeFile.id, activeFile.content)
       useFileStore.getState().markModified(activeFile.id, false)
+      const b = await getFileDiskBaseline(activeFile.path)
+      if (b) useFileStore.getState().setDiskBaseline(activeFile.id, b.mtimeMs, b.size)
     }
   }
 
@@ -109,6 +205,27 @@ function App() {
   const handleRedo = () => {
     const view = useEditorStore.getState().editorView
     if (view) redo(view)
+  }
+
+  const conflictFile = externalConflictFileId
+    ? files.find((f) => f.id === externalConflictFileId)
+    : null
+
+  const handleReloadFromDiskConflict = async () => {
+    if (!conflictFile || typeof conflictFile.content !== 'string' || !conflictFile.path) return
+    try {
+      const text = await readTextFile(conflictFile.path)
+      const onDisk = await getFileDiskBaseline(conflictFile.path)
+      useFileStore.getState().replaceContentFromDisk(conflictFile.id, text)
+      if (onDisk) useFileStore.getState().setDiskBaseline(conflictFile.id, onDisk.mtimeMs, onDisk.size)
+      setExternalConflictFileId(null)
+    } catch (e) {
+      await notify({
+        title: '重新加载失败',
+        message: e instanceof Error ? e.message : String(e),
+        kind: 'error',
+      })
+    }
   }
 
   const handleExportPdf = async () => {
@@ -225,6 +342,13 @@ function App() {
         file={activeFile || null}
         theme={theme}
       />
+      {conflictFile && typeof conflictFile.content === 'string' ? (
+        <ExternalFileChangedDialog
+          fileName={conflictFile.name}
+          onReload={() => void handleReloadFromDiskConflict()}
+          onKeepEditing={() => setExternalConflictFileId(null)}
+        />
+      ) : null}
     </div>
   )
 }
