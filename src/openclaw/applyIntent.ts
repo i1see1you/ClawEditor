@@ -4,6 +4,7 @@ import {
   applyDeleteLiteral,
   applyLineOp,
   applyCaseOp,
+  mergeRange,
   type DocSelectionNullable,
 } from '../utils/documentOps'
 import { SUPPORTED_INTENT_PROTOCOL_VERSION, type EditorIntentV1, type IntentScope } from './intentTypes'
@@ -155,6 +156,68 @@ export function applyParsedIntent(
     case 'case_title': {
       const r = applyCaseOp(fileText, effSel, 'title', '首字母大写')
       return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
+    }
+    case 'insert_at': {
+      const text = intent.text
+      if (typeof text !== 'string') {
+        return { kind: 'error', message: 'insert_at 需要 text 字段。' }
+      }
+      let offset: number
+      if (typeof intent.offset === 'number' && Number.isFinite(intent.offset)) {
+        offset = Math.trunc(intent.offset)
+      } else {
+        offset = selection?.from ?? 0
+      }
+      if (offset < 0 || offset > fileText.length) {
+        return { kind: 'error', message: 'insert_at 的 offset 超出文档范围。' }
+      }
+      const newText = mergeRange(fileText, offset, offset, text)
+      return {
+        kind: 'edit',
+        newText,
+        summary: `insert_at @${offset}（${text.length} 字符）`,
+        title: 'OpenClaw 意图',
+      }
+    }
+    case 'append': {
+      const text = intent.text
+      if (typeof text !== 'string') {
+        return { kind: 'error', message: 'append 需要 text 字段。' }
+      }
+      return {
+        kind: 'edit',
+        newText: fileText + text,
+        summary: `append（${text.length} 字符）`,
+        title: 'OpenClaw 意图',
+      }
+    }
+    case 'set_document': {
+      const text = intent.text
+      if (typeof text !== 'string') {
+        return { kind: 'error', message: 'set_document 需要 text 字段。' }
+      }
+      return {
+        kind: 'edit',
+        newText: text,
+        summary: `set_document（${text.length} 字符）`,
+        title: 'OpenClaw 意图',
+      }
+    }
+    case 'set_selection': {
+      const text = intent.text
+      if (typeof text !== 'string') {
+        return { kind: 'error', message: 'set_selection 需要 text 字段。' }
+      }
+      if (!selection || selection.from === selection.to) {
+        return { kind: 'error', message: 'set_selection 需要非空选区。' }
+      }
+      const newText = mergeRange(fileText, selection.from, selection.to, text)
+      return {
+        kind: 'edit',
+        newText,
+        summary: `set_selection（${text.length} 字符）`,
+        title: 'OpenClaw 意图',
+      }
     }
     case 'goto_line': {
       const line = intent.line

@@ -10,6 +10,11 @@ import type { OpenClawAction } from '../openclaw/types'
 import { applyParsedIntent, type ApplyIntentResult } from '../openclaw/applyIntent'
 import { gotoLineInEditor } from '../utils/gotoLine'
 import { parseSimpleEditInstruction } from '../utils/simpleCommands'
+import { mergeRange } from '../utils/documentOps'
+import {
+  MAX_INSERT_CHARS,
+  tryParseInsertAppendBody,
+} from '../utils/parseEditInsertAppend'
 
 interface AgentPanelProps {
   activeFile: FileTab | undefined
@@ -22,6 +27,10 @@ type LocalEditParseResult =
   | { kind: 'error'; message: string }
   | { kind: 'fallback_gateway'; rest: string }
   | { kind: 'noop' }
+  | {
+      kind: 'edit_clipboard'
+      op: 'insert' | 'append' | 'replace_file' | 'replace_selection'
+    }
 
 export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   const termRef = useRef<XTerminalRef>(null)
@@ -107,7 +116,8 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   const parseLocalEdit = (
     fileTextRaw: string,
     rawLine: string,
-    selectionForLocal: { from: number; to: number; text: string } | null
+    selectionForLocal: { from: number; to: number; text: string } | null,
+    cursorPos: number
   ): LocalEditParseResult => {
     const line = rawLine.trim()
     const m = line.match(/^\/edit(?:\s+([\s\S]*))?$/i)
@@ -123,6 +133,13 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       '/edit delete <text>',
       '/edit line <trim|sort|dedupe|empty|blank>',
       '/edit case <upper|lower|title>',
+      '/edit insert --clipboard   或 /edit insert -c   （从剪贴板读入，插入光标处）',
+      '/edit append --clipboard   或 /edit append -c   （从剪贴板读入，追加到文末）',
+      "/edit append '…'   或 /edit insert \"…\"   （单/双引号一行内短文本）",
+      '/edit insert \'\'\'…\'\'\'',
+      '/edit append """…"""   （三引号多行或大段；多行粘贴后回车提交）',
+      '/edit replace-file …   （整篇正文替换为载荷；--clipboard / 三引号 / 单双引号同 insert）',
+      '/edit replace-selection …   （整块选区替换为载荷；需非空选区）',
       '',
       '提示：非编辑意图请直接输入对话，不要加 /edit。',
     ].join('\n')
@@ -214,6 +231,80 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       return { kind: 'edit', newText: local.newText, summary: local.summary }
     }
 
+    if (sub === 'insert') {
+      const r = tryParseInsertAppendBody(afterSub)
+      if (r.kind === 'error') return fail(r.message)
+      if (r.kind === 'incomplete') {
+        return fail('未闭合的三引号块（多行请粘贴完整内容直到出现闭合引号）。')
+      }
+      if (r.kind === 'clipboard') return { kind: 'edit_clipboard', op: 'insert' }
+      if (r.kind === 'text') {
+        const pos = cursorPos
+        if (pos < 0 || pos > fileTextRaw.length) {
+          return fail('光标位置无效（请确保编辑器焦点在目标位置）。')
+        }
+        const newText = mergeRange(fileTextRaw, pos, pos, r.text)
+        return {
+          kind: 'edit',
+          newText,
+          summary: `在光标处插入 ${r.text.length} 字符`,
+        }
+      }
+    }
+
+    if (sub === 'append') {
+      const r = tryParseInsertAppendBody(afterSub)
+      if (r.kind === 'error') return fail(r.message)
+      if (r.kind === 'incomplete') {
+        return fail('未闭合的三引号块（多行请粘贴完整内容直到出现闭合引号）。')
+      }
+      if (r.kind === 'clipboard') return { kind: 'edit_clipboard', op: 'append' }
+      if (r.kind === 'text') {
+        const newText = fileTextRaw + r.text
+        return {
+          kind: 'edit',
+          newText,
+          summary: `在文末追加 ${r.text.length} 字符`,
+        }
+      }
+    }
+
+    if (sub === 'replace-file') {
+      const r = tryParseInsertAppendBody(afterSub)
+      if (r.kind === 'error') return fail(r.message)
+      if (r.kind === 'incomplete') {
+        return fail('未闭合的引号块（多行请粘贴完整内容直到闭合）。')
+      }
+      if (r.kind === 'clipboard') return { kind: 'edit_clipboard', op: 'replace_file' }
+      if (r.kind === 'text') {
+        return {
+          kind: 'edit',
+          newText: r.text,
+          summary: `整篇替换为 ${r.text.length} 字符`,
+        }
+      }
+    }
+
+    if (sub === 'replace-selection') {
+      if (!sel) {
+        return fail('replace-selection 需要编辑器中非空选区。')
+      }
+      const r = tryParseInsertAppendBody(afterSub)
+      if (r.kind === 'error') return fail(r.message)
+      if (r.kind === 'incomplete') {
+        return fail('未闭合的引号块（多行请粘贴完整内容直到闭合）。')
+      }
+      if (r.kind === 'clipboard') return { kind: 'edit_clipboard', op: 'replace_selection' }
+      if (r.kind === 'text') {
+        const newText = mergeRange(fileTextRaw, sel.from, sel.to, r.text)
+        return {
+          kind: 'edit',
+          newText,
+          summary: `选区整块替换为 ${r.text.length} 字符`,
+        }
+      }
+    }
+
     // Back-compat: allow "/edit <freeform>" to use existing local parser,
     // but keep the "one entry point" requirement (must be prefixed by /edit).
     const local = parseSimpleEditInstruction(fileTextRaw, rest, sel)
@@ -292,6 +383,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         selection && selection.from !== selection.to
           ? { from: selection.from, to: selection.to, text: selection.text }
           : null
+      const cursorPos = selection?.from ?? 0
 
       const aieditMatch = trimmed.match(/^\/aiedit(?:\s+([\s\S]*))?$/i)
       if (aieditMatch) {
@@ -334,7 +426,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         return
       }
 
-      const localResult = parseLocalEdit(fileText, trimmed, sel)
+      const localResult = parseLocalEdit(fileText, trimmed, sel, cursorPos)
       if (localResult.kind === 'help') {
         useAgentStore.setState({ lastError: null })
         termRef.current?.writeln(localResult.text)
@@ -356,6 +448,61 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             summary: localResult.summary,
           })
         }
+        return
+      }
+
+      if (localResult.kind === 'edit_clipboard') {
+        useAgentStore.setState({ lastError: null })
+        void (async () => {
+          try {
+            if (typeof navigator === 'undefined' || !navigator.clipboard?.readText) {
+              termRef.current?.writeln(
+                '\x1b[31m当前环境无法读取剪贴板（需安全上下文与权限）。\x1b[0m'
+              )
+              return
+            }
+            const text = await navigator.clipboard.readText()
+            if (text.length > MAX_INSERT_CHARS) {
+              termRef.current?.writeln(
+                `\x1b[31m剪贴板内容过长（>${MAX_INSERT_CHARS} 字符）。\x1b[0m`
+              )
+              return
+            }
+            let newText: string
+            let summary: string
+            if (localResult.op === 'insert') {
+              newText = mergeRange(fileText, cursorPos, cursorPos, text)
+              summary = `从剪贴板在光标处插入 ${text.length} 字符`
+            } else if (localResult.op === 'append') {
+              newText = fileText + text
+              summary = `从剪贴板在文末追加 ${text.length} 字符`
+            } else if (localResult.op === 'replace_file') {
+              newText = text
+              summary = `从剪贴板整篇替换（${text.length} 字符）`
+            } else {
+              if (!sel) {
+                termRef.current?.writeln(
+                  '\x1b[31mreplace-selection 需要非空选区。\x1b[0m'
+                )
+                return
+              }
+              newText = mergeRange(fileText, sel.from, sel.to, text)
+              summary = `从剪贴板替换选区（${text.length} 字符）`
+            }
+            if (newText === fileText) {
+              termRef.current?.writeln('\x1b[33m剪贴板为空，未修改文档。\x1b[0m')
+              return
+            }
+            setPendingProposal({
+              newText,
+              title: '本地命令',
+              summary,
+            })
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            termRef.current?.writeln(`\x1b[31m读取剪贴板失败: ${msg}\x1b[0m`)
+          }
+        })()
         return
       }
 

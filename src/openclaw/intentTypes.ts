@@ -15,6 +15,10 @@ export type IntentOp =
   | 'case_upper'
   | 'case_lower'
   | 'case_title'
+  | 'insert_at'
+  | 'append'
+  | 'set_document'
+  | 'set_selection'
   | 'goto_line'
   | 'clarify'
   | 'noop'
@@ -30,4 +34,8 @@ export interface EditorIntentV1 {
   needle?: string
   line?: number
   message?: string
+  /** UTF-16 offset for insert_at; defaults to selection/cursor when omitted. */
+  offset?: number
+  /** Text to insert (insert_at / append). */
+  text?: string
 }

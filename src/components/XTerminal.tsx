@@ -2,6 +2,7 @@ import { useEffect, useRef, useImperativeHandle, forwardRef } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
+import { isIncompleteQuotedEdit } from '../utils/parseEditInsertAppend'
 
 export interface XTerminalRef {
   write: (data: string) => void
@@ -198,6 +199,11 @@ export const XTerminal = forwardRef<XTerminalRef, XTerminalProps>(
         for (const ch of data) {
           if (ch === '\r' || ch === '\n') {
             const line = lineBufferRef.current
+            if (isIncompleteQuotedEdit(line)) {
+              lineBufferRef.current += '\n'
+              term.write('\r\n')
+              continue
+            }
             term.writeln('')
             lineBufferRef.current = ''
             draftRef.current = ''

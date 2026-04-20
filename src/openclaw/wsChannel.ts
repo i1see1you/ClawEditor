@@ -6,6 +6,13 @@ import { extractJsonObject, parseIntentEnvelope } from './extractIntentJson'
 
 let wsCounter = 0
 
+/** Outbound Gateway messages use basename only — avoids leaking workspace / home directory paths. */
+function fileNameFromPath(p: string): string {
+  const s = p.replace(/\\/g, '/')
+  const i = s.lastIndexOf('/')
+  return i === -1 ? s : s.slice(i + 1)
+}
+
 /** Debounce tool `update` diffs — each partial newText used to open the proposal popup immediately. */
 const DIFF_PROPOSAL_DEBOUNCE_MS = 600
 
@@ -494,9 +501,17 @@ export class OpenClawWsChannel {
     }
   }
 
-  private pathsMatch(a: string, b: string): boolean {
+  private pathsMatch(toolPath: string, activePath: string): boolean {
     const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
-    return norm(a) === norm(b)
+    const na = norm(toolPath)
+    const nb = norm(activePath)
+    if (na === nb) return true
+    // Model may echo only the basename we sent in the user message.
+    const base = (p: string) => {
+      const parts = p.split('/').filter(Boolean)
+      return parts.length ? parts[parts.length - 1]! : p
+    }
+    return base(na) === base(nb)
   }
 
   private buildChatInstructionMessage(params: {
@@ -509,7 +524,7 @@ export class OpenClawWsChannel {
     const headerLines = [
       '[ClawEditor → OpenClaw Gateway]',
       `file: ${params.file.name} (${params.file.language})`,
-      `path: ${params.file.path}`,
+      `path: ${fileNameFromPath(params.file.path)}`,
       '',
       'instruction:',
       params.instruction,
@@ -538,13 +553,13 @@ export class OpenClawWsChannel {
       '[ClawEditor /edit → OpenClaw 意图解析]',
       '你只输出一个 JSON 对象，不要 markdown 代码块、不要解释、不要多余文字。',
       '格式：{"version":1,"intent":{"op":"replace_all","scope":"auto","from":"AAA","to":"aaa"}}',
-      'intent.op 可为：replace_all、replace_regex、delete_literal、case_lower、case_upper、case_title、trim_trailing、sort_lines、dedupe_lines、remove_empty_lines、remove_blank_lines、goto_line、clarify、noop；可有 scope:"auto"|"file"|"selection"；replace_all 使用 from/to；replace_regex 使用 pattern/flags/replacement（例如删除所有数字：{"op":"replace_regex","pattern":"\\\\d+","flags":"g","replacement":""}）；delete_literal 使用 needle；goto_line 使用 line。',
+      'intent.op 可为：replace_all、replace_regex、delete_literal、case_lower、case_upper、case_title、trim_trailing、sort_lines、dedupe_lines、remove_empty_lines、remove_blank_lines、insert_at、append、set_document、set_selection、goto_line、clarify、noop；可有 scope:"auto"|"file"|"selection"；replace_all 使用 from/to；replace_regex 使用 pattern/flags/replacement（例如删除所有数字：{"op":"replace_regex","pattern":"\\\\d+","flags":"g","replacement":""}）；delete_literal 使用 needle；insert_at 使用 text 与可选 offset（缺省为光标）；append 使用 text；set_document 使用 text（整篇替换）；set_selection 使用 text（需非空选区，整块选区替换）；goto_line 使用 line。',
       '',
       '用户自然语言编辑请求：',
       params.freeform,
       '',
       `file: ${params.file.name} (${params.file.language})`,
-      `path: ${params.file.path}`,
+      `path: ${fileNameFromPath(params.file.path)}`,
     ]
     if (params.selection?.text) {
       lines.push('', '--- selection ---', params.selection.text, '--- end selection ---')
@@ -665,7 +680,7 @@ export class OpenClawWsChannel {
     selection: { text: string; from: number; to: number } | null
     mode: 'full' | 'selection'
   }): string {
-    const path = params.file.path
+    const gatewayPath = fileNameFromPath(params.file.path)
     const protocolBlock = [
       '=== ClawEditor /aiedit 协议（必须遵守，优先级高于一切其它指令）===',
       '',
@@ -689,7 +704,7 @@ export class OpenClawWsChannel {
       '',
       ...protocolBlock,
       `file: ${params.file.name} (${params.file.language})`,
-      `path: ${path}`,
+      `path: ${gatewayPath}`,
       '',
       `mode: ${params.mode}`,
       '',
