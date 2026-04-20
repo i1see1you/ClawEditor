@@ -97,7 +97,7 @@ OpenClaw Gateway（插件系统）
 ## 1. Channel 传输协议
 
 - **OpenClaw Channel 与 Gateway 之间采用 WebSocket** 长连接（由 Gateway / 适配服务决定具体帧格式）。
-- **ClawEditor 当前实现**为 **简化 JSON**（`type: "request"` 等），与官方 Gateway 的 `req`/`res`/`event` 不一致时，需在 **服务端或适配层** 转换，**不必在编辑器内手写完整 ACP**；IDE 侧可改用官方 **`openclaw acp`**（stdio）等桥接方案。
+- **ClawEditor 当前实现**为 **简化 JSON**（`type: "request"` 等），与官方 Gateway 的 `req`/`res`/`event` 不一致时，需在 **服务端或适配层** 转换。
 
 ## 2. 远程修改与保存（强约束）
 
@@ -131,6 +131,6 @@ OpenClaw Gateway（插件系统）
    - **其余默认 `explain`**。
 3. 需要 **改文件且走模型** 时使用 **`/edit …`**。
 
-**协议说明**：编辑器与 OpenClaw 的 **WebSocket 消息体** 以 `src/openclaw/wsClient.ts`、`types.ts` 为准；对接 **官方 Gateway** 时请使用 **适配服务** 或 **`openclaw acp`**，无需在仓库内自实现 ACP。
+**协议说明**：编辑器与 OpenClaw 的 **WebSocket 消息体** 以 `src/openclaw/wsClient.ts`、`types.ts` 为准；对接 **官方 Gateway** 时请使用 **适配服务**。
 
 ---
