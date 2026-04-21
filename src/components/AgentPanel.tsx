@@ -391,9 +391,9 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         const helpText = [
           '用法：/aiedit <自然语言指令>',
           '',
-          '  由 OpenClaw 大模型改写当前文件；需已连接 Gateway。',
+          '  由 OpenClaw 按 skills/aiedit/SKILL.md 协议改写；回复应为 JSON（四种本地 op）或由 Gateway diff 工具给出合并全文；需已连接 Gateway。',
           '  无选区：附带全文，确认时为全文 diff。',
-          '  有单选区：仅发送选区与偏移，确认时仅 diff 选区（模型仍应通过 diff 返回合并后的完整文件）。',
+          '  有选区：发送选区与全文，确认时可仅 diff 选区。',
           '',
           '  示例：/aiedit 把语气改得更正式',
         ].join('\n')
@@ -414,6 +414,46 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           useAgentStore.setState({ lastError: null })
           const ok = await send({
             action: 'aiedit',
+            instruction: rest,
+            ...contextForSend!,
+          })
+          if (!ok) {
+            termRef.current?.writeln(
+              '\x1b[31m请求未能发出（未连接或网关拒绝）。请查看工具栏状态与系统消息。\x1b[0m'
+            )
+          }
+        })()
+        return
+      }
+
+      const aiimportMatch = trimmed.match(/^\/aiimport(?:\s+([\s\S]*))?$/i)
+      if (aiimportMatch) {
+        const rest = (aiimportMatch[1] ?? '').trim()
+        const helpText = [
+          '用法：/aiimport <自然语言说明>',
+          '',
+          '  按 skills/aiimport/SKILL.md 将外部内容导入当前缓冲；模型仅输出 JSON（四种本地 op）或 diff。',
+          '  需已连接 Gateway。',
+          '',
+          '  示例：/aiimport 把下面这段接在文末：……',
+        ].join('\n')
+        if (!rest || /^help$/i.test(rest) || /^h$/i.test(rest) || /^帮助$/.test(rest)) {
+          useAgentStore.setState({ lastError: null })
+          termRef.current?.writeln(helpText)
+          return
+        }
+        if (!wsUrl.trim()) {
+          termRef.current?.writeln('\x1b[31m请填写 Gateway 地址。\x1b[0m')
+          return
+        }
+        if (connection !== 'open') {
+          termRef.current?.writeln('\x1b[31m未连接 OpenClaw Gateway。请先连接。\x1b[0m')
+          return
+        }
+        void (async () => {
+          useAgentStore.setState({ lastError: null })
+          const ok = await send({
+            action: 'aiimport',
             instruction: rest,
             ...contextForSend!,
           })

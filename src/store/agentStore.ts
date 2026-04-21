@@ -1,26 +1,21 @@
 import { create } from 'zustand'
 import type { OpenClawAction } from '../openclaw/types'
 import { OpenClawWsChannel } from '../openclaw/wsChannel'
-import {
-  extractDocumentFromAssistantMarkdown,
-  mergeAiEditExtractWithSnapshot,
-} from '../utils/aiEditExtract'
 
 export type AgentConnection = 'idle' | 'connecting' | 'open' | 'error'
 
 const OPENCLAW_EDIT_TIMEOUT_MS = 10_000
-const OPENCLAW_AIEDIT_TIMEOUT_MS = 120_000
+const OPENCLAW_LOCAL_SKILL_TIMEOUT_MS = 120_000
 const openclawEditTimeouts = new Map<string, number>()
 
-/** Per-request context so onProposal can attach selection diff metadata for `/aiedit`. */
-const pendingAiEditContext = new Map<
+/** Per-request context for `/aiedit` and `/aiimport` — selection diff metadata for onProposal. */
+const pendingLocalSkillContext = new Map<
   string,
   {
     diffMode: 'full' | 'selection'
     selFrom: number
     selTo: number
     fileLen: number
-    /** Snapshot at send time — used when assistant returns text instead of tool diff. */
     fileTextSnapshot: string
   }
 >()
@@ -102,10 +97,6 @@ interface AgentState {
   lastError: string | null
   incomingIntent: IncomingParsedIntent | null
   takeIncomingIntent: () => IncomingParsedIntent | null
-  /** True after `/aiedit` send succeeds until proposal or assistant fallback consumes it. */
-  aiEditAwaitingTextFallback: boolean
-  /** Concatenate assistant `onFinal` chunks until extract yields a complete fenced file (avoids early wrong diff). */
-  aiEditAccumulatedAssistantMarkdown: string
 
   connect: () => Promise<void>
   disconnect: () => Promise<void>
@@ -132,44 +123,6 @@ interface AgentState {
   pushAssistant: (content: string) => void
   pushUser: (content: string) => void
   pushSystem: (content: string) => void
-}
-
-function tryConsumeAiEditProposalFromAssistantMarkdown(
-  markdown: string,
-  get: () => AgentState
-): PendingProposal | null {
-  if (!get().aiEditAwaitingTextFallback) return null
-  if (pendingAiEditContext.size !== 1) return null
-
-  const rid = [...pendingAiEditContext.keys()][0]
-  const ctx = pendingAiEditContext.get(rid)
-  if (!ctx?.fileTextSnapshot) return null
-
-  const extracted = extractDocumentFromAssistantMarkdown(markdown)
-  if (!extracted) return null
-
-  // Guard against early extraction of unrelated fenced blocks (e.g. sender metadata).
-  // For /aiedit fallback, require a strong signal that the assistant actually provided the
-  // merged document, otherwise keep waiting for later chunks.
-  const hasStrongMarker = /\bNewText:\s*/.test(markdown) || /\bnewText:\s*\|\s*\n/.test(markdown)
-  if (!hasStrongMarker && extracted.length < Math.max(32, ctx.fileTextSnapshot.length / 3)) {
-    return null
-  }
-
-  const newFull = mergeAiEditExtractWithSnapshot(ctx.fileTextSnapshot, ctx, extracted)
-  if (newFull === ctx.fileTextSnapshot) return null
-
-  clearEditTimeout(rid)
-  pendingAiEditContext.delete(rid)
-
-  const diffMode = ctx.diffMode === 'selection' ? 'selection' : 'full'
-  return {
-    newText: newFull,
-    title: 'AI 编辑',
-    summary: '来自助手最终回复（未走 Gateway diff 工具），请确认后再应用',
-    diffMode,
-    ...(diffMode === 'selection' ? { selectionFrom: ctx.selFrom, selectionTo: ctx.selTo } : {}),
-  }
 }
 
 function buildOpenClawHandlers(
@@ -207,6 +160,10 @@ function buildOpenClawHandlers(
                   : null) as string | null
             const version = typeof o.version === 'number' ? o.version : 1
             if (op) {
+              for (const rid of [...pendingLocalSkillContext.keys()]) {
+                clearEditTimeout(rid)
+                pendingLocalSkillContext.delete(rid)
+              }
               // If the assistant outputs an intent JSON envelope, treat it as internal protocol and don't print it.
               set({
                 suppressAssistantFinalIntentJson: false,
@@ -221,33 +178,6 @@ function buildOpenClawHandlers(
         }
       }
 
-      const aiAwait = get().aiEditAwaitingTextFallback && pendingAiEditContext.size === 1
-      let mergedForAiEdit = markdown
-      if (aiAwait) {
-        const prev = get().aiEditAccumulatedAssistantMarkdown
-        mergedForAiEdit = prev ? `${prev}\n\n${markdown}` : markdown
-        set({ aiEditAccumulatedAssistantMarkdown: mergedForAiEdit })
-      }
-
-      const aiProposal = tryConsumeAiEditProposalFromAssistantMarkdown(mergedForAiEdit, get)
-      if (aiProposal) {
-        set((s) => ({
-          streaming: '',
-          aiEditAwaitingTextFallback: false,
-          aiEditAccumulatedAssistantMarkdown: '',
-          pendingProposal: aiProposal,
-          messages: [
-            ...s.messages,
-            {
-              id: `s-${Date.now()}`,
-              role: 'system' as const,
-              content: '已生成 AI 修改提案，请在弹窗中确认 diff 后再点击「应用修改」。',
-            },
-          ],
-        }))
-        return
-      }
-
       const mid = `m-${Date.now()}`
       set((s) => ({
         messages: [...s.messages, { id: mid, role: 'assistant' as const, content: markdown }],
@@ -255,8 +185,6 @@ function buildOpenClawHandlers(
       }))
     },
     onProposal: ({ requestId, proposal }) => {
-      // Tool diff payloads often omit requestId; pair with the single pending /aiedit row
-      // so the 120s timer clears and selection diff metadata applies.
       let ctx:
         | {
             diffMode: 'full' | 'selection'
@@ -269,26 +197,23 @@ function buildOpenClawHandlers(
 
       if (requestId) {
         clearEditTimeout(requestId)
-        ctx = pendingAiEditContext.get(requestId)
-        if (ctx) pendingAiEditContext.delete(requestId)
-      } else if (pendingAiEditContext.size === 1) {
-        const rid = pendingAiEditContext.keys().next().value as string
-        ctx = pendingAiEditContext.get(rid)
+        ctx = pendingLocalSkillContext.get(requestId)
+        if (ctx) pendingLocalSkillContext.delete(requestId)
+      } else if (pendingLocalSkillContext.size === 1) {
+        const rid = pendingLocalSkillContext.keys().next().value as string
+        ctx = pendingLocalSkillContext.get(rid)
         clearEditTimeout(rid)
-        pendingAiEditContext.delete(rid)
+        pendingLocalSkillContext.delete(rid)
       }
 
       const diffMode: 'full' | 'selection' =
         ctx?.diffMode === 'selection' ? 'selection' : 'full'
 
       if (ctx?.fileTextSnapshot !== undefined && proposal.newText === ctx.fileTextSnapshot) {
-        set({ aiEditAwaitingTextFallback: false, aiEditAccumulatedAssistantMarkdown: '' })
         return
       }
 
       set({
-        aiEditAwaitingTextFallback: false,
-        aiEditAccumulatedAssistantMarkdown: '',
         pendingProposal: {
           requestId,
           newText: proposal.newText,
@@ -307,9 +232,9 @@ function buildOpenClawHandlers(
     },
     onIntentError: ({ requestId, code, message }) => {
       clearEditTimeout(requestId)
-      if (requestId) pendingAiEditContext.delete(requestId)
-      if (pendingAiEditContext.size === 0) {
-        set({ aiEditAwaitingTextFallback: false, aiEditAccumulatedAssistantMarkdown: '' })
+      if (requestId) pendingLocalSkillContext.delete(requestId)
+      if (pendingLocalSkillContext.size === 0) {
+        /* noop */
       }
       const codePart = code ? ` [${code}]` : ''
       const idPart = requestId ? ` (${requestId})` : ''
@@ -352,8 +277,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   pendingProposal: null,
   lastError: null,
   incomingIntent: null,
-  aiEditAwaitingTextFallback: false,
-  aiEditAccumulatedAssistantMarkdown: '',
   takeIncomingIntent: () => {
     const p = get().incomingIntent
     if (!p) return null
@@ -432,10 +355,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       openclawEditTimeouts.set(id, timer)
     }
 
-    if (action === 'aiedit') {
-      set({ aiEditAccumulatedAssistantMarkdown: '' })
+    const localSkill = action === 'aiedit' || action === 'aiimport'
+    if (localSkill) {
       const hasSel = Boolean(selection && selection.from !== selection.to)
-      pendingAiEditContext.set(id, {
+      pendingLocalSkillContext.set(id, {
         diffMode: hasSel ? 'selection' : 'full',
         selFrom: hasSel ? selection!.from : 0,
         selTo: hasSel ? selection!.to : 0,
@@ -443,50 +366,51 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         fileTextSnapshot: text,
       })
       clearEditTimeout(id)
+      const label = action === 'aiedit' ? '/aiedit' : '/aiimport'
       const timer = window.setTimeout(() => {
         if (openclawEditTimeouts.get(id) === timer) {
           openclawEditTimeouts.delete(id)
-          pendingAiEditContext.delete(id)
-          set({ aiEditAwaitingTextFallback: false, aiEditAccumulatedAssistantMarkdown: '' })
+          pendingLocalSkillContext.delete(id)
           get().pushSystem(
-            `OpenClaw /aiedit 超时（${OPENCLAW_AIEDIT_TIMEOUT_MS / 1000} 秒）：${instruction}`
+            `OpenClaw ${label} 超时（${OPENCLAW_LOCAL_SKILL_TIMEOUT_MS / 1000} 秒）：${instruction}`
           )
         }
-      }, OPENCLAW_AIEDIT_TIMEOUT_MS)
+      }, OPENCLAW_LOCAL_SKILL_TIMEOUT_MS)
       openclawEditTimeouts.set(id, timer)
     }
 
     try {
-      if (action === 'aiedit') {
+      if (action === 'aiedit' || action === 'aiimport') {
         const hasSel = Boolean(selection && selection.from !== selection.to)
-        await c.sendAiEditMessage({
+        const shared = {
           instruction,
           file,
           text,
           cursorPos,
           selection,
-          mode: hasSel ? 'selection' : 'full',
-        })
+          mode: hasSel ? ('selection' as const) : ('full' as const),
+        }
+        if (action === 'aiedit') {
+          await c.sendAiEditMessage(shared)
+        } else {
+          await c.sendAiImportMessage(shared)
+        }
       } else {
         await c.sendChatMessage({ instruction, file, text, cursorPos, selection })
       }
     } catch (e) {
       clearEditTimeout(id)
-      if (action === 'aiedit') {
-        pendingAiEditContext.delete(id)
-        set({ aiEditAwaitingTextFallback: false, aiEditAccumulatedAssistantMarkdown: '' })
+      if (localSkill) {
+        pendingLocalSkillContext.delete(id)
       }
       const msg = e instanceof Error ? e.message : String(e)
       get().pushSystem(`发送失败: ${msg}`)
       set({ lastError: msg })
       return false
     } finally {
-      if (action !== 'aiedit') {
+      if (!localSkill) {
         clearEditTimeout(id)
       }
-    }
-    if (action === 'aiedit') {
-      set({ aiEditAwaitingTextFallback: true })
     }
     return true
   },
@@ -500,7 +424,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     try {
       return await c.parseEditIntentViaGateway(params)
     } finally {
-      // If it didn't get consumed by onFinal filter, release it anyway.
       set({ suppressAssistantFinalIntentJson: false })
     }
   },

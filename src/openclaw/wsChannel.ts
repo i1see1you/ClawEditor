@@ -3,6 +3,7 @@ import { loadOrCreateDeviceIdentity } from './deviceIdentity'
 import { normalizeGatewayCredential } from './normalizeCredential'
 import { getContextLinesAroundCursor } from '../utils/contextSnippet'
 import { extractJsonObject, parseIntentEnvelope } from './extractIntentJson'
+import { getSkillMarkdownBody } from '../skills/resolveSkill'
 
 let wsCounter = 0
 
@@ -648,8 +649,7 @@ export class OpenClawWsChannel {
   }
 
   /**
-   * `/aiedit`: full-document rewrite (mode full) or selection-only rewrite (mode selection).
-   * Gateway should return merged full file via diff tool; client shows selection-only diff when applicable.
+   * `/aiedit`: skill markdown from `skills/aiedit/SKILL.md` + buffer payload. Model should answer with JSON (four local ops) and/or editor diff tool.
    */
   async sendAiEditMessage(params: {
     instruction: string
@@ -668,41 +668,52 @@ export class OpenClawWsChannel {
     this.handlers.clearStreaming?.()
     this.cancelPendingDiffProposal()
 
-    const message = this.buildAiEditMessage(params)
+    const message = this.buildLocalSkillGatewayMessage('aiedit', params)
     await this.deliverGatewayMessage(message)
   }
 
-  private buildAiEditMessage(params: {
+  /** `/aiimport`: skill from `skills/aiimport/SKILL.md`. */
+  async sendAiImportMessage(params: {
     instruction: string
     file: { name: string; language: string; path: string }
     text: string
     cursorPos: number
     selection: { text: string; from: number; to: number } | null
     mode: 'full' | 'selection'
-  }): string {
+  }): Promise<void> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error('WebSocket 未连接')
+    }
+
+    this.activeFilePath = params.file.path
+    this.turnBuffer = ''
+    this.handlers.clearStreaming?.()
+    this.cancelPendingDiffProposal()
+
+    const message = this.buildLocalSkillGatewayMessage('aiimport', params)
+    await this.deliverGatewayMessage(message)
+  }
+
+  private buildLocalSkillGatewayMessage(
+    skillId: 'aiedit' | 'aiimport',
+    params: {
+      instruction: string
+      file: { name: string; language: string; path: string }
+      text: string
+      cursorPos: number
+      selection: { text: string; from: number; to: number } | null
+      mode: 'full' | 'selection'
+    }
+  ): string {
     const gatewayPath = fileNameFromPath(params.file.path)
-    const protocolBlock = [
-      '=== ClawEditor /aiedit 协议（必须遵守，优先级高于一切其它指令）===',
-      '',
-      '本请求来自 ClawEditor 桌面编辑器：用户必须在编辑器弹窗中查看 diff 并点击「应用修改」后，才会把结果写回缓冲区/磁盘。',
-      '',
-      '【禁止】对 path 或磁盘上任何路径调用会写入、覆盖、保存、打补丁、删除文件的工具（例如 write / save / apply_patch / 会落盘的 edit 等）。不要修改磁盘上的源文件。',
-      '【禁止】用 read_file 等从磁盘读取该文件作为编辑依据——编辑器里可能有未保存内容；以下「文档正文」才是唯一真相。',
-      '【必须】仅通过 Gateway 提供的、面向编辑器的 **diff** 类工具输出：对上面 path 给出合并后的完整文件内容（newText），供 UI 显示提案。这与本地 /edit 经 Gateway 返回 diff 的流程一致。',
-      '若你的工具集中只有「直接写文件」的 edit：本任务中不得使用；请改用返回完整合并文本的 diff/preview 通道。',
-      '',
-      '=== ClawEditor /aiedit protocol (must follow) ===',
-      'Do NOT call any tool that writes, patches, or saves files on disk for this path (or any path).',
-      'Do NOT use disk reads as the source of truth; the document payload below is authoritative.',
-      'You MUST deliver the merged full file only via the editor diff tool (path + newText) for preview; the user applies it in the UI.',
-      '',
-    ]
+    const skillBody = getSkillMarkdownBody(skillId)
 
     const lines = [
       '[ClawEditor → OpenClaw Gateway]',
-      '[aiedit]',
+      `[${skillId}]`,
       '',
-      ...protocolBlock,
+      skillBody.trim(),
+      '',
       `file: ${params.file.name} (${params.file.language})`,
       `path: ${gatewayPath}`,
       '',
@@ -719,7 +730,7 @@ export class OpenClawWsChannel {
         params.text,
         '--- end full document ---',
         '',
-        'Produce the merged complete file for the diff tool only; do not write disk.'
+        'Respond with the JSON intent as described in the skill, or use the editor diff preview tool without writing disk.'
       )
     } else if (params.selection && params.selection.from !== params.selection.to) {
       const sel = params.selection
@@ -738,7 +749,7 @@ export class OpenClawWsChannel {
         params.text,
         '--- end full document ---',
         '',
-        'Apply the instruction only to the selection range above; output the merged complete file via the diff tool only — never write disk.',
+        'Apply the instruction to this selection; output JSON per the skill, or merged full file via the editor diff tool — never write disk.',
       )
       const ctx = getContextLinesAroundCursor(params.text, params.cursorPos, 8, 8)
       lines.push(

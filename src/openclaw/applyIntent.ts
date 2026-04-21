@@ -7,6 +7,7 @@ import {
   mergeRange,
   type DocSelectionNullable,
 } from '../utils/documentOps'
+import { isLocalEditFourOp, applyLocalEditFourIntent } from '../utils/localEditCommand'
 import { SUPPORTED_INTENT_PROTOCOL_VERSION, type EditorIntentV1, type IntentScope } from './intentTypes'
 
 export type ApplyIntentResult =
@@ -73,6 +74,14 @@ export function applyParsedIntent(
   const op = intent.op
   if (typeof op !== 'string') {
     return { kind: 'error', message: '缺少 op 字段。' }
+  }
+
+  if (isLocalEditFourOp(op)) {
+    const r = applyLocalEditFourIntent(fileText, intent as unknown as Record<string, unknown>)
+    if (!r.ok) {
+      return { kind: 'error', message: r.message }
+    }
+    return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
   }
 
   const resolved = resolveScope(intent.scope, selection)
@@ -176,18 +185,6 @@ export function applyParsedIntent(
         kind: 'edit',
         newText,
         summary: `insert_at @${offset}（${text.length} 字符）`,
-        title: 'OpenClaw 意图',
-      }
-    }
-    case 'append': {
-      const text = intent.text
-      if (typeof text !== 'string') {
-        return { kind: 'error', message: 'append 需要 text 字段。' }
-      }
-      return {
-        kind: 'edit',
-        newText: fileText + text,
-        summary: `append（${text.length} 字符）`,
         title: 'OpenClaw 意图',
       }
     }

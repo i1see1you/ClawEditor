@@ -19,6 +19,12 @@ export type IntentOp =
   | 'append'
   | 'set_document'
   | 'set_selection'
+  /** Skill `/aiedit` / `/aiimport` four-op JSON (whole buffer). */
+  | 'replace_file'
+  /** UTF-16 [selFrom, selTo) + text. */
+  | 'replace_selection'
+  /** Same as insert_at; skill alias using `at`. */
+  | 'insert'
   | 'goto_line'
   | 'clarify'
   | 'noop'
@@ -28,6 +34,12 @@ export interface EditorIntentV1 {
   scope?: IntentScope
   from?: string
   to?: string
+  /** replace_selection: UTF-16 start (inclusive). */
+  selFrom?: number
+  /** replace_selection: UTF-16 end (exclusive). */
+  selTo?: number
+  /** insert: UTF-16 offset (alias of offset). */
+  at?: number
   pattern?: string
   flags?: string
   replacement?: string
