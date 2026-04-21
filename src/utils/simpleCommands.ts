@@ -81,6 +81,11 @@ function tryDeleteSubstring(
     return applyDeleteLine1(fileText, sel, Number(m[1]), 'delete line')
   }
 
+  const t0 = instruction.trim()
+  if (/^删除所有空白行$/s.test(t0) || /^删除所有空行$/s.test(t0)) {
+    return null
+  }
+
   m = instruction.match(/^删除\s*(.+)$/s)
   if (m) {
     return applyDeleteLiteral(fileText, sel, m[1].trim(), '删除')

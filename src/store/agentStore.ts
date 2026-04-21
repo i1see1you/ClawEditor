@@ -335,9 +335,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       return false
     }
 
-    const userLine = `[${action}] ${instruction}`
-    set((s) => ({
-      messages: [...s.messages, { id: `u-${id}`, role: 'user' as const, content: userLine }],
+    set(() => ({
       streaming: '',
       lastError: null,
     }))
@@ -404,8 +402,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         pendingLocalSkillContext.delete(id)
       }
       const msg = e instanceof Error ? e.message : String(e)
-      get().pushSystem(`发送失败: ${msg}`)
-      set({ lastError: msg })
+      set({ lastError: `发送失败: ${msg}` })
       return false
     } finally {
       if (!localSkill) {

@@ -1,11 +1,12 @@
-import { useEffect, useRef, useMemo, useCallback } from 'react'
+import { useEffect, useRef, useMemo, useCallback, useState } from 'react'
 import { computeSelectionDiffSlices } from '../utils/selectionMergeDiff'
 import { useAgentStore } from '../store/agentStore'
 import { useEditorStore } from '../store/editorStore'
 import { useFileStore } from '../store/fileStore'
 import type { FileTab } from '../types'
 import { TextDiffView } from './TextDiffView'
-import { XTerminal, type XTerminalRef } from './XTerminal'
+import { AgentChatInput } from './AgentChatInput'
+import { getEditReplaceParamHint } from './agentCommandPalette'
 import type { OpenClawAction } from '../openclaw/types'
 import { applyParsedIntent, type ApplyIntentResult } from '../openclaw/applyIntent'
 import { gotoLineInEditor } from '../utils/gotoLine'
@@ -32,9 +33,28 @@ type LocalEditParseResult =
       op: 'insert' | 'append' | 'replace_file' | 'replace_selection'
     }
 
+const CMD_HISTORY_MAX = 200
+
+function stripAnsi(s: string): string {
+  return s.replace(/\u001b\[[0-9;]*m/g, '')
+}
+
+function ansiMsg(msg: string): string {
+  return stripAnsi(msg)
+}
+
+function formatIntentForLog(version: number, intent: unknown): string {
+  try {
+    return `OpenClaw 返回的意图 JSON（version ${version}）：\n${JSON.stringify(intent, null, 2)}`
+  } catch {
+    return `OpenClaw 返回的意图（version ${version}，无法序列化为 JSON）：\n${String(intent)}`
+  }
+}
+
 export function AgentPanel({ activeFile, height }: AgentPanelProps) {
-  const termRef = useRef<XTerminalRef>(null)
-  const streamWrittenLenRef = useRef(0)
+  const [inputValue, setInputValue] = useState('')
+  const [commandHistory, setCommandHistory] = useState<string[]>([])
+  const chatLogRef = useRef<HTMLDivElement>(null)
 
   const wsUrl = useAgentStore((s) => s.wsUrl)
   const setWsUrl = useAgentStore((s) => s.setWsUrl)
@@ -43,6 +63,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   const gatewayPassword = useAgentStore((s) => s.gatewayPassword)
   const setGatewayPassword = useAgentStore((s) => s.setGatewayPassword)
   const connection = useAgentStore((s) => s.connection)
+  const prevConnectionRef = useRef(connection)
   const pendingProposal = useAgentStore((s) => s.pendingProposal)
   const lastError = useAgentStore((s) => s.lastError)
   const connect = useAgentStore((s) => s.connect)
@@ -55,6 +76,8 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   const streaming = useAgentStore((s) => s.streaming)
   const incomingIntent = useAgentStore((s) => s.incomingIntent)
   const takeIncomingIntent = useAgentStore((s) => s.takeIncomingIntent)
+  const pushUser = useAgentStore((s) => s.pushUser)
+  const pushSystem = useAgentStore((s) => s.pushSystem)
 
   const selection = useEditorStore((s) => s.selection)
 
@@ -69,6 +92,16 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   )
 
   const fileText = typeof activeFile?.content === 'string' ? activeFile.content : ''
+
+  const inputPlaceholder = useMemo(() => {
+    if (!canUseAgent) return '请先打开非 PDF 文本文件以使用 Agent'
+    const editHint = getEditReplaceParamHint(inputValue)
+    if (editHint) return editHint
+    if (!wsUrl.trim()) return '填写 Gateway 地址后连接 · 输入 / 查看命令'
+    if (connection !== 'open')
+      return '连接 Gateway 后发送 · 输入 / 查看命令'
+    return '输入 / 查看命令 · 自然语言或 /aiedit、/aiimport、/edit …'
+  }, [canUseAgent, wsUrl, connection, inputValue])
 
   const proposalDiff = useMemo(() => {
     if (!pendingProposal) return null
@@ -163,8 +196,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     })
 
     if (sub === 'replace') {
-      // /edit replace A with B
-      // /edit replace A -> B
       const r1 = afterSub.match(/^([\s\S]+?)\s+with\s+([\s\S]+)$/i)
       if (r1) {
         const local = parseSimpleEditInstruction(
@@ -305,8 +336,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       }
     }
 
-    // Back-compat: allow "/edit <freeform>" to use existing local parser,
-    // but keep the "one entry point" requirement (must be prefixed by /edit).
     const local = parseSimpleEditInstruction(fileTextRaw, rest, sel)
     if (local) return { kind: 'edit', newText: local.newText, summary: local.summary }
     return { kind: 'fallback_gateway', rest }
@@ -334,7 +363,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       switch (result.kind) {
         case 'edit':
           if (result.newText === fileText) {
-            termRef.current?.writeln('\x1b[33m意图未改变文档\x1b[0m')
+            pushSystem(ansiMsg('\x1b[33m意图未改变文档\x1b[0m'))
           } else {
             setPendingProposal({
               requestId,
@@ -342,37 +371,41 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               title: result.title,
               summary: result.summary,
             })
-            termRef.current?.writeln('\x1b[33m已生成修改提案：请在弹窗中确认 diff 后再点击“应用修改”。\x1b[0m')
+            pushSystem(
+              ansiMsg(
+                '\x1b[33m已生成修改提案：请在弹窗中确认 diff 后再点击「应用修改」。\x1b[0m'
+              )
+            )
           }
           break
         case 'goto': {
           const view = useEditorStore.getState().editorView
           if (!view) {
-            termRef.current?.writeln('\x1b[33m编辑器尚未就绪，无法跳转行\x1b[0m')
+            pushSystem(ansiMsg('\x1b[33m编辑器尚未就绪，无法跳转行\x1b[0m'))
             break
           }
           if (!gotoLineInEditor(view, result.line)) {
-            termRef.current?.writeln(`\x1b[33m无法跳转到第 ${result.line} 行\x1b[0m`)
+            pushSystem(ansiMsg(`\x1b[33m无法跳转到第 ${result.line} 行\x1b[0m`))
           }
           break
         }
         case 'clarify':
-          termRef.current?.writeln(`\x1b[33m${result.message}\x1b[0m`)
+          pushSystem(ansiMsg(`\x1b[33m${result.message}\x1b[0m`))
           break
         case 'noop':
           break
         case 'error':
-          termRef.current?.writeln(`\x1b[31m${result.message}\x1b[0m`)
+          pushSystem(ansiMsg(`\x1b[31m${result.message}\x1b[0m`))
           break
       }
     },
-    [fileText, setPendingProposal]
+    [fileText, setPendingProposal, pushSystem]
   )
 
-  const handleCommand = useCallback(
+  const processCommand = useCallback(
     (line: string) => {
       if (!canUseAgent || !contextForSend) {
-        termRef.current?.writeln('\x1b[33m请打开文本文件以使用 Agent\x1b[0m')
+        pushSystem(ansiMsg('\x1b[33m请打开文本文件以使用 Agent\x1b[0m'))
         return
       }
 
@@ -399,15 +432,15 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         ].join('\n')
         if (!rest || /^help$/i.test(rest) || /^h$/i.test(rest) || /^帮助$/.test(rest)) {
           useAgentStore.setState({ lastError: null })
-          termRef.current?.writeln(helpText)
+          pushSystem(helpText)
           return
         }
         if (!wsUrl.trim()) {
-          termRef.current?.writeln('\x1b[31m请填写 Gateway 地址。\x1b[0m')
+          pushSystem(ansiMsg('\x1b[31m请填写 Gateway 地址。\x1b[0m'))
           return
         }
         if (connection !== 'open') {
-          termRef.current?.writeln('\x1b[31m未连接 OpenClaw Gateway。请先连接。\x1b[0m')
+          pushSystem(ansiMsg('\x1b[31m未连接 OpenClaw Gateway。请先连接。\x1b[0m'))
           return
         }
         void (async () => {
@@ -418,8 +451,10 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             ...contextForSend!,
           })
           if (!ok) {
-            termRef.current?.writeln(
-              '\x1b[31m请求未能发出（未连接或网关拒绝）。请查看工具栏状态与系统消息。\x1b[0m'
+            pushSystem(
+              ansiMsg(
+                '\x1b[31m请求未能发出（未连接或网关拒绝）。请查看工具栏状态与系统消息。\x1b[0m'
+              )
             )
           }
         })()
@@ -439,15 +474,15 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         ].join('\n')
         if (!rest || /^help$/i.test(rest) || /^h$/i.test(rest) || /^帮助$/.test(rest)) {
           useAgentStore.setState({ lastError: null })
-          termRef.current?.writeln(helpText)
+          pushSystem(helpText)
           return
         }
         if (!wsUrl.trim()) {
-          termRef.current?.writeln('\x1b[31m请填写 Gateway 地址。\x1b[0m')
+          pushSystem(ansiMsg('\x1b[31m请填写 Gateway 地址。\x1b[0m'))
           return
         }
         if (connection !== 'open') {
-          termRef.current?.writeln('\x1b[31m未连接 OpenClaw Gateway。请先连接。\x1b[0m')
+          pushSystem(ansiMsg('\x1b[31m未连接 OpenClaw Gateway。请先连接。\x1b[0m'))
           return
         }
         void (async () => {
@@ -458,8 +493,10 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             ...contextForSend!,
           })
           if (!ok) {
-            termRef.current?.writeln(
-              '\x1b[31m请求未能发出（未连接或网关拒绝）。请查看工具栏状态与系统消息。\x1b[0m'
+            pushSystem(
+              ansiMsg(
+                '\x1b[31m请求未能发出（未连接或网关拒绝）。请查看工具栏状态与系统消息。\x1b[0m'
+              )
             )
           }
         })()
@@ -469,18 +506,18 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       const localResult = parseLocalEdit(fileText, trimmed, sel, cursorPos)
       if (localResult.kind === 'help') {
         useAgentStore.setState({ lastError: null })
-        termRef.current?.writeln(localResult.text)
+        pushSystem(localResult.text)
         return
       }
       if (localResult.kind === 'error') {
         useAgentStore.setState({ lastError: null })
-        termRef.current?.writeln(`\x1b[31m${localResult.message}\x1b[0m`)
+        pushSystem(ansiMsg(`\x1b[31m${localResult.message}\x1b[0m`))
         return
       }
       if (localResult.kind === 'edit') {
         useAgentStore.setState({ lastError: null })
         if (localResult.newText === fileText) {
-          termRef.current?.writeln('\x1b[33m本地命令没有产生变化\x1b[0m')
+          pushSystem(ansiMsg('\x1b[33m本地命令没有产生变化\x1b[0m'))
         } else {
           setPendingProposal({
             newText: localResult.newText,
@@ -496,15 +533,17 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         void (async () => {
           try {
             if (typeof navigator === 'undefined' || !navigator.clipboard?.readText) {
-              termRef.current?.writeln(
-                '\x1b[31m当前环境无法读取剪贴板（需安全上下文与权限）。\x1b[0m'
+              pushSystem(
+                ansiMsg(
+                  '\x1b[31m当前环境无法读取剪贴板（需安全上下文与权限）。\x1b[0m'
+                )
               )
               return
             }
             const text = await navigator.clipboard.readText()
             if (text.length > MAX_INSERT_CHARS) {
-              termRef.current?.writeln(
-                `\x1b[31m剪贴板内容过长（>${MAX_INSERT_CHARS} 字符）。\x1b[0m`
+              pushSystem(
+                ansiMsg(`\x1b[31m剪贴板内容过长（>${MAX_INSERT_CHARS} 字符）。\x1b[0m`)
               )
               return
             }
@@ -521,8 +560,8 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               summary = `从剪贴板整篇替换（${text.length} 字符）`
             } else {
               if (!sel) {
-                termRef.current?.writeln(
-                  '\x1b[31mreplace-selection 需要非空选区。\x1b[0m'
+                pushSystem(
+                  ansiMsg('\x1b[31mreplace-selection 需要非空选区。\x1b[0m')
                 )
                 return
               }
@@ -530,7 +569,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               summary = `从剪贴板替换选区（${text.length} 字符）`
             }
             if (newText === fileText) {
-              termRef.current?.writeln('\x1b[33m剪贴板为空，未修改文档。\x1b[0m')
+              pushSystem(ansiMsg('\x1b[33m剪贴板为空，未修改文档。\x1b[0m'))
               return
             }
             setPendingProposal({
@@ -540,7 +579,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             })
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
-            termRef.current?.writeln(`\x1b[31m读取剪贴板失败: ${msg}\x1b[0m`)
+            pushSystem(ansiMsg(`\x1b[31m读取剪贴板失败: ${msg}\x1b[0m`))
           }
         })()
         return
@@ -548,30 +587,37 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
 
       if (localResult.kind === 'fallback_gateway') {
         if (!wsUrl.trim()) {
-          termRef.current?.writeln(
-            '\x1b[31m本地无法解析该 /edit。请连接 OpenClaw Gateway，或改用子命令（/edit help）。\x1b[0m'
+          pushSystem(
+            ansiMsg(
+              '\x1b[31m本地无法解析该 /edit。请连接 OpenClaw Gateway，或改用子命令（/edit help）。\x1b[0m'
+            )
           )
           return
         }
         if (connection !== 'open') {
-          termRef.current?.writeln(
-            '\x1b[31m本地无法解析该 /edit。请先连接 OpenClaw，或改用子命令（/edit help）。\x1b[0m'
+          pushSystem(
+            ansiMsg(
+              '\x1b[31m本地无法解析该 /edit。请先连接 OpenClaw，或改用子命令（/edit help）。\x1b[0m'
+            )
           )
           return
         }
         void (async () => {
           useAgentStore.setState({ lastError: null })
-          termRef.current?.writeln('\x1b[33m本地解析失败，正在通过 OpenClaw 解析编辑意图…\x1b[0m')
+          pushSystem(
+            ansiMsg('\x1b[33m本地解析失败，正在通过 OpenClaw 解析编辑意图…\x1b[0m')
+          )
           try {
             const { version, intent } = await parseEditIntentFallback({
               freeform: localResult.rest,
               ...contextForSend,
             })
+            pushSystem(formatIntentForLog(version, intent))
             const r = applyParsedIntent(fileText, sel, version, intent)
             handleApplyIntentResult(r)
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
-            termRef.current?.writeln(`\x1b[31m${msg}\x1b[0m`)
+            pushSystem(ansiMsg(`\x1b[31m${msg}\x1b[0m`))
           }
         })()
         return
@@ -581,19 +627,21 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       if (!instruction) return
 
       if (!wsUrl.trim()) {
-        termRef.current?.writeln('\x1b[31m请填写 Gateway 地址。\x1b[0m')
+        pushSystem(ansiMsg('\x1b[31m请填写 Gateway 地址。\x1b[0m'))
         return
       }
       if (connection !== 'open') {
-        termRef.current?.writeln('\x1b[31m未连接 OpenClaw Gateway。请先连接。\x1b[0m')
+        pushSystem(ansiMsg('\x1b[31m未连接 OpenClaw Gateway。请先连接。\x1b[0m'))
         return
       }
 
       void (async () => {
         const ok = await send({ action, instruction, ...contextForSend })
         if (!ok) {
-          termRef.current?.writeln(
-            '\x1b[31m请求未能发出（未连接或网关拒绝）。请查看工具栏状态与系统消息。\x1b[0m'
+          pushSystem(
+            ansiMsg(
+              '\x1b[31m请求未能发出（未连接或网关拒绝）。请查看工具栏状态与系统消息。\x1b[0m'
+            )
           )
         }
       })()
@@ -606,52 +654,50 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       wsUrl,
       connection,
       send,
-      wsUrl,
       setPendingProposal,
       parseEditIntentFallback,
       handleApplyIntentResult,
+      pushSystem,
     ]
   )
 
-  useEffect(() => {
-    const term = termRef.current
-    if (!term) return
-
-    if (lastError) {
-      term.writeln(`\x1b[31m${lastError}\x1b[0m`)
-      term.write('> ')
-      term.focus()
-    }
-  }, [lastError])
-
-  useEffect(() => {
-    const term = termRef.current
-    if (!term) return
-
-    messages.slice(-1).forEach((m) => {
-      const prefix = m.role === 'user' ? '\x1b[36m>\x1b[0m ' : m.role === 'assistant' ? '\x1b[32mOpenClaw:\x1b[0m ' : '\x1b[33m系统:\x1b[0m '
-      const lines = m.content.split('\n')
-      lines.forEach((line, i) => {
-        if (i === 0) term.writeln(prefix + line)
-        else term.writeln('  ' + line)
+  const handleSubmit = useCallback(
+    (raw: string) => {
+      const trimmed = raw.trim()
+      if (!trimmed) return
+      pushUser(trimmed)
+      setInputValue('')
+      setCommandHistory((h) => {
+        if (trimmed === h[h.length - 1]) return h
+        const next = [...h, trimmed]
+        if (next.length > CMD_HISTORY_MAX) {
+          next.splice(0, next.length - CMD_HISTORY_MAX)
+        }
+        return next
       })
-    })
-  }, [messages])
+      processCommand(trimmed)
+    },
+    [pushUser, processCommand]
+  )
 
   useEffect(() => {
-    const term = termRef.current
-    if (!term) return
-    const s = streaming
-    if (s.length === 0) {
-      streamWrittenLenRef.current = 0
-      return
+    if (!lastError) return
+    pushSystem(ansiMsg(`\x1b[31m${lastError}\x1b[0m`))
+  }, [lastError, pushSystem])
+
+  useEffect(() => {
+    const el = chatLogRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  }, [messages, streaming])
+
+  useEffect(() => {
+    const prev = prevConnectionRef.current
+    if (connection === 'open' && prev !== 'open') {
+      pushSystem('已连接 OpenClaw Gateway')
     }
-    const w = streamWrittenLenRef.current
-    if (s.length >= w) {
-      term.write(s.slice(w))
-      streamWrittenLenRef.current = s.length
-    }
-  }, [streaming])
+    prevConnectionRef.current = connection
+  }, [connection, pushSystem])
 
   useEffect(() => {
     if (!incomingIntent) return
@@ -682,29 +728,18 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     updateContent(activeFile.id, pendingProposal.newText)
     markModified(activeFile.id, true)
     clearProposal()
-    termRef.current?.writeln('\x1b[32m修改已应用\x1b[0m')
+    pushSystem(ansiMsg('\x1b[32m修改已应用\x1b[0m'))
   }
 
   const handleConnect = () => {
     if (connection === 'open') {
       void disconnect().then(() => {
-        termRef.current?.writeln('\x1b[33m已断开连接\x1b[0m')
+        pushSystem(ansiMsg('\x1b[33m已断开连接\x1b[0m'))
       })
     } else {
       void connect()
     }
   }
-
-  useEffect(() => {
-    const term = termRef.current
-    if (!term) return
-    if (connection === 'open') {
-      term.writeln('\x1b[32m已连接 OpenClaw\x1b[0m')
-      term.write('> ')
-      term.focus()
-    }
-    // 断开/错误请依赖工具栏状态与 lastError 提示。
-  }, [connection])
 
   return (
     <div className="agent-panel" style={{ height }}>
@@ -758,18 +793,41 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         ) : null}
       </div>
 
-      <div
-        className="agent-terminal-wrap"
-        role="presentation"
-        onMouseDown={() => {
-          termRef.current?.focus()
-        }}
-      >
-        <XTerminal
-          ref={termRef}
-          onLine={handleCommand}
-          prompt="> "
-          className="agent-terminal"
+      <div className="agent-chat-log" ref={chatLogRef}>
+        <div className="agent-chat-messages">
+          {messages.map((m) => (
+            <div
+              key={m.id}
+              className={`agent-chat-msg agent-chat-msg-${m.role}`}
+            >
+              <div className="agent-chat-msg-role">
+                {m.role === 'user'
+                  ? '你'
+                  : m.role === 'assistant'
+                    ? 'OpenClaw'
+                    : '系统'}
+              </div>
+              <pre className="agent-chat-msg-body">{m.content}</pre>
+            </div>
+          ))}
+          {streaming ? (
+            <div className="agent-chat-msg agent-chat-msg-assistant agent-chat-streaming">
+              <div className="agent-chat-msg-role">OpenClaw · 生成中</div>
+              <pre className="agent-chat-msg-body agent-chat-stream-body">{streaming}</pre>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="agent-chat-input-row">
+        <AgentChatInput
+          value={inputValue}
+          onChange={setInputValue}
+          onSubmit={handleSubmit}
+          placeholder={inputPlaceholder}
+          disabled={!canUseAgent}
+          commandHistory={commandHistory}
+          aria-label="Agent 指令与对话"
         />
       </div>
 

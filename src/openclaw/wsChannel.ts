@@ -356,9 +356,12 @@ export class OpenClawWsChannel {
         if (isStreaming) {
           if (chunk) this.intentParseAcc += chunk
         } else {
-          const full = this.intentParseAcc.length > 0 ? this.intentParseAcc : chunk
+          // 合并流式累积与本轮正文；避免网关先发「空完成」导致用空串 resolve，从而误报「未找到 JSON」。
+          const full = this.intentParseAcc + (chunk ?? '')
           this.intentParseAcc = ''
-          this.finishIntentParse(full)
+          if (full.trim().length > 0) {
+            this.finishIntentParse(full)
+          }
         }
       }
       return
