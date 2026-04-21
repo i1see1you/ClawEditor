@@ -134,18 +134,6 @@ export function applyParsedIntent(
       if (!r) return { kind: 'error', message: 'delete_literal 参数无效。' }
       return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
     }
-    case 'remove_empty_lines': {
-      const r = applyLineOp(fileText, effSel, 'empty', '删除空行')
-      return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
-    }
-    case 'remove_blank_lines': {
-      const r = applyLineOp(fileText, effSel, 'blank', '删除空白行')
-      return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
-    }
-    case 'trim_trailing': {
-      const r = applyLineOp(fileText, effSel, 'trim', '去除行尾空格')
-      return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
-    }
     case 'sort_lines': {
       const r = applyLineOp(fileText, effSel, 'sort', '排序行')
       return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }

@@ -89,6 +89,17 @@ function normalizeRegexFlags(flags: string | undefined): string {
   return out.join('')
 }
 
+/**
+ * Some gateways send JSON string values where `\uXXXX` was over-escaped: after
+ * JSON.parse the string still contains six literal characters \\ u 0 0 0 a
+ * instead of one Unicode code point. Decode those sequences for pattern/replacement.
+ */
+function decodeLiteralUnicodeEscapes(s: string): string {
+  return s.replace(/\\u([0-9a-fA-F]{4})/gi, (_, hex) =>
+    String.fromCodePoint(parseInt(hex, 16))
+  )
+}
+
 export function applyReplaceRegex(
   fileText: string,
   sel: DocSelectionNullable,
@@ -99,27 +110,30 @@ export function applyReplaceRegex(
 ): { newText: string; summary: string } | null {
   if (!pattern) return null
 
+  const patternDecoded = decodeLiteralUnicodeEscapes(pattern)
+  const replacementDecoded = decodeLiteralUnicodeEscapes(replacement)
+
   const normalizedFlags = normalizeRegexFlags(flags)
   let re: RegExp
   try {
-    re = new RegExp(pattern, normalizedFlags)
+    re = new RegExp(patternDecoded, normalizedFlags)
   } catch {
     return null
   }
 
   if (sel && sel.from !== sel.to) {
-    const piece = sel.text.replace(re, replacement)
+    const piece = sel.text.replace(re, replacementDecoded)
     const newText = mergeRange(fileText, sel.from, sel.to, piece)
     return {
       newText,
-      summary: `${label}/${pattern}/${normalizedFlags} -> ${JSON.stringify(replacement)}（选区内替换）`,
+      summary: `${label}/${patternDecoded}/${normalizedFlags} -> ${JSON.stringify(replacementDecoded)}（选区内替换）`,
     }
   }
 
-  const newText = fileText.replace(re, replacement)
+  const newText = fileText.replace(re, replacementDecoded)
   return {
     newText,
-    summary: `${label}/${pattern}/${normalizedFlags} -> ${JSON.stringify(replacement)}（全文替换）`,
+    summary: `${label}/${patternDecoded}/${normalizedFlags} -> ${JSON.stringify(replacementDecoded)}（全文替换）`,
   }
 }
 
