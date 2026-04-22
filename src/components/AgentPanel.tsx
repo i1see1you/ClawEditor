@@ -16,6 +16,10 @@ import {
   MAX_INSERT_CHARS,
   tryParseInsertAppendBody,
 } from '../utils/parseEditInsertAppend'
+import { open } from '@tauri-apps/plugin-dialog'
+import { readTextFile, stat } from '@tauri-apps/plugin-fs'
+import { getClaweditorConfigForSkill, validateClaweditorConfig, type ViImportUiConfig } from '../skills/claweditorConfig'
+import { runSkillCompletions } from '../skills/completionEngine'
 
 interface AgentPanelProps {
   activeFile: FileTab | undefined
@@ -51,10 +55,26 @@ function formatIntentForLog(version: number, intent: unknown): string {
   }
 }
 
+type ActionModalState =
+  | { kind: 'none' }
+  | {
+      kind: 'prompt'
+      title: string
+      placeholder?: string
+      resolve: (v: string | null) => void
+    }
+  | {
+      kind: 'one_select'
+      title: string
+      options: { id: string; label: string }[]
+      resolve: (v: string | null) => void
+    }
+
 export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   const [inputValue, setInputValue] = useState('')
   const [commandHistory, setCommandHistory] = useState<string[]>([])
   const chatLogRef = useRef<HTMLDivElement>(null)
+  const [actionModal, setActionModal] = useState<ActionModalState>({ kind: 'none' })
 
   const wsUrl = useAgentStore((s) => s.wsUrl)
   const setWsUrl = useAgentStore((s) => s.setWsUrl)
@@ -497,14 +517,17 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       if (aiimportMatch) {
         const rest = (aiimportMatch[1] ?? '').trim()
         const helpText = [
-          '用法：/aiimport <自然语言说明>',
+          '用法：/aiimport  或  /aiimport <位置说明（可选）>',
           '',
-          '  按 skills/aiimport/SKILL.md 将外部内容导入当前缓冲；模型仅输出 JSON（四种本地 op）或 diff。',
+          '  按 skills/aiimport/SKILL.md 将外部内容导入当前缓冲；模型仅输出 JSON（四种本地 op）。',
+          '  默认在文末追加；仅在命令行里写明光标/选区/整篇替换等要求时才改插入位置。',
+          '  若缺少导入源参数，将按 skill 的补全规则自动弹窗补全。',
           '  需已连接 Gateway。',
           '',
-          '  示例：/aiimport 把下面这段接在文末：……',
+          '  示例：/aiimport',
+          '  示例：/aiimport 在光标处插入',
         ].join('\n')
-        if (!rest || /^help$/i.test(rest) || /^h$/i.test(rest) || /^帮助$/.test(rest)) {
+        if (/^help$/i.test(rest) || /^h$/i.test(rest) || /^帮助$/.test(rest)) {
           useAgentStore.setState({ lastError: null })
           pushSystem(helpText)
           return
@@ -519,9 +542,136 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         }
         void (async () => {
           useAgentStore.setState({ lastError: null })
+          const cfgAll = getClaweditorConfigForSkill('aiimport')
+          const cfg = cfgAll?.viimport as ViImportUiConfig | undefined
+          if (cfgAll) {
+            const v = validateClaweditorConfig(cfgAll as any)
+            if (!v.ok) {
+              pushSystem(
+                ansiMsg(
+                  `\x1b[31mclaweditor 配置错误（skills/aiimport/SKILL.md）:\n- ${v.errors.join('\n- ')}\x1b[0m`
+                )
+              )
+              if (v.warnings.length) {
+                pushSystem(ansiMsg(`\x1b[33m配置警告:\n- ${v.warnings.join('\n- ')}\x1b[0m`))
+              }
+              return
+            }
+            if (v.warnings.length) {
+              pushSystem(ansiMsg(`\x1b[33m配置警告:\n- ${v.warnings.join('\n- ')}\x1b[0m`))
+            }
+          }
+
+          const runAction = async (a: any) => {
+            const action = a?.action as string
+            if (action === 'one_select') {
+              const title = a?.ui?.title ?? cfg?.sourceSelectTitle ?? '选择'
+              const options =
+                (a?.options as { id: string; label: string }[] | undefined) ??
+                cfg?.sourceSelectOptions ??
+                []
+              return await new Promise<Record<string, string> | null>((resolve) => {
+                setActionModal({
+                  kind: 'one_select',
+                  title,
+                  options,
+                  resolve: (v) => resolve(v ? { id: v } : null),
+                })
+              })
+            }
+            if (action === 'prompt_user') {
+              const title = a?.ui?.title ?? cfg?.promptTitle ?? '请输入'
+              const placeholder = a?.ui?.placeholder ?? cfg?.promptPlaceholder
+              return await new Promise<Record<string, string> | null>((resolve) => {
+                setActionModal({
+                  kind: 'prompt',
+                  title,
+                  placeholder,
+                  resolve: (v) => resolve(v === null ? null : { text: v.trim() }),
+                })
+              })
+            }
+            if (action === 'pick_file') {
+              const title = a?.ui?.title ?? cfg?.pickFileTitle ?? '选择文件'
+              const hardMax = 5_000_000
+              const maxBytes = Math.min(
+                typeof a?.maxBytes === 'number' ? a.maxBytes : 1_048_576,
+                hardMax
+              )
+              const selected = await open({ multiple: false, title })
+              if (!selected || Array.isArray(selected)) return null
+              const path = String(selected)
+              const name = path.split('/').pop() || path
+              const st = await stat(path).catch(() => null)
+              if (st && typeof st.size === 'number' && st.size > maxBytes) {
+                throw new Error(`导入文件过大（>${maxBytes} bytes）`)
+              }
+              const content = await readTextFile(path)
+              return { name, content }
+            }
+            if (action === 'clipboard_read') {
+              const hardMax = 500_000
+              const maxChars = Math.min(
+                typeof a?.maxChars === 'number' ? a.maxChars : 200_000,
+                hardMax
+              )
+              if (typeof navigator === 'undefined' || !navigator.clipboard?.readText) {
+                throw new Error('当前环境无法读取剪贴板（需安全上下文与权限）。')
+              }
+              const content = await navigator.clipboard.readText()
+              if (content.length > maxChars) {
+                throw new Error(`剪贴板内容过长（>${maxChars} chars）`)
+              }
+              return { content }
+            }
+            throw new Error(`不支持的 action: ${action}`)
+          }
+
+          const r = await runSkillCompletions({
+            args: cfgAll?.args,
+            completions: cfgAll?.completions,
+            instructionWrapper: cfgAll?.instructionWrapper,
+            ctx: { rest, instruction: rest },
+            runAction: async (a) => {
+              try {
+                return await runAction(a)
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e)
+                pushSystem(ansiMsg(`\x1b[31m补全失败: ${msg}\x1b[0m`))
+                return null
+              }
+            },
+          })
+          if (!r.ok) {
+            if ('cancelled' in r && r.cancelled) {
+              pushSystem(ansiMsg('\x1b[33m已取消 /aiimport。\x1b[0m'))
+            } else {
+              pushSystem(ansiMsg(`\x1b[31m${(r as any).error}\x1b[0m`))
+            }
+            return
+          }
+          if (r.trace.length) {
+            pushSystem(
+              ansiMsg(
+                `\x1b[36m补全轨迹（/aiimport）:\n${r.trace
+                  .map((s) =>
+                    s.injected
+                      ? `- ${s.ruleId}: ${s.action} → ${s.injected.into} (+${s.injected.chars} chars)`
+                      : `- ${s.ruleId}: ${s.action}`
+                  )
+                  .join('\n')}\x1b[0m`
+              )
+            )
+          }
+          pushSystem(
+            ansiMsg(
+              `\x1b[36m补全后的 instruction（预览，前 800 字）:\n${r.instruction.slice(0, 800)}\x1b[0m`
+            )
+          )
+
           const ok = await send({
             action: 'aiimport',
-            instruction: rest,
+            instruction: r.instruction,
             ...contextForSend!,
           })
           if (!ok) {
@@ -964,6 +1114,66 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                 应用修改
               </button>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {actionModal.kind !== 'none' ? (
+        <div className="external-file-dialog-overlay" role="dialog" aria-modal="true">
+          <div className="external-file-dialog-card">
+            <div className="external-file-dialog-title">{actionModal.title}</div>
+            {actionModal.kind === 'prompt' ? (
+              <div className="external-file-dialog-body">
+                <input
+                  type="text"
+                  className="agent-ws-url"
+                  placeholder={actionModal.placeholder ?? ''}
+                  autoFocus
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const v = (e.target as HTMLInputElement).value
+                      const r = actionModal.resolve
+                      setActionModal({ kind: 'none' })
+                      r(v)
+                    } else if (e.key === 'Escape') {
+                      const r = actionModal.resolve
+                      setActionModal({ kind: 'none' })
+                      r(null)
+                    }
+                  }}
+                />
+              </div>
+            ) : actionModal.kind === 'one_select' ? (
+              <div className="external-file-dialog-body">
+                <div className="external-file-dialog-buttons" style={{ flexWrap: 'wrap' }}>
+                  {actionModal.options.map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      className="agent-btn"
+                      onClick={() => {
+                        const r = actionModal.resolve
+                        setActionModal({ kind: 'none' })
+                        r(opt.id)
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    className="agent-btn"
+                    onClick={() => {
+                      const r = actionModal.resolve
+                      setActionModal({ kind: 'none' })
+                      r(null)
+                    }}
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}

@@ -128,7 +128,7 @@ export function AgentChatInput({
         setPaletteIndex((i) => (i - 1 + items.length) % items.length)
         return
       }
-      if (e.key === 'Tab') {
+      if (e.key === 'Tab' && !e.shiftKey) {
         e.preventDefault()
         const item = items[paletteIndex] ?? items[0]
         if (!item) return
@@ -144,26 +144,6 @@ export function AgentChatInput({
             el.setSelectionRange(cursor, cursor)
             setCursorPos(cursor)
           }
-        })
-        return
-      }
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault()
-        const item = items[paletteIndex] ?? items[0]
-        if (!item) return
-        const { value: nv, cursor } = applyPaletteInsert(
-          value,
-          cursorPos,
-          item
-        )
-        handleChange(nv)
-        requestAnimationFrame(() => {
-          const el = taRef.current
-          if (el) {
-            el.setSelectionRange(cursor, cursor)
-            setCursorPos(cursor)
-          }
-          el?.focus()
         })
         return
       }
@@ -291,7 +271,7 @@ export function AgentChatInput({
       />
       <div className="agent-chat-hint">
         Enter 发送 · Shift+Enter 换行
-        {paletteOpen ? ' · ↑↓ 选择 · Tab/Enter 填入 · Esc 取消 /' : ''}
+        {paletteOpen ? ' · ↑↓ 选择 · Tab 填入 · Esc 取消 /' : ''}
         {!paletteOpen && commandHistory.length > 0
           ? ' · ↑↓ 历史命令'
           : ''}
