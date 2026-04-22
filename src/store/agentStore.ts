@@ -17,6 +17,9 @@ const pendingLocalSkillContext = new Map<
     selTo: number
     fileLen: number
     fileTextSnapshot: string
+    fileId?: string
+    filePath?: string
+    fileName?: string
   }
 >()
 
@@ -40,6 +43,10 @@ export interface PendingProposal {
   newText: string
   title?: string
   summary?: string
+  /** Proposal target file identity; used to avoid applying to the wrong active tab. */
+  fileId?: string
+  filePath?: string
+  fileName?: string
   /** When set with selection range, UI may show diff for the selection only. */
   diffMode?: 'full' | 'selection'
   selectionFrom?: number
@@ -50,6 +57,9 @@ export interface IncomingParsedIntent {
   requestId?: string
   version: number
   intent: unknown
+  fileId?: string
+  filePath?: string
+  fileName?: string
 }
 
 const WS_URL_KEY = 'openclaw.wsUrl'
@@ -103,7 +113,7 @@ interface AgentState {
   send: (params: {
     action: OpenClawAction
     instruction: string
-    file: { name: string; language: string; path: string }
+    file: { id?: string; name: string; language: string; path: string }
     text: string
     cursorPos: number
     selection: { text: string; from: number; to: number } | null
@@ -160,16 +170,34 @@ function buildOpenClawHandlers(
                   : null) as string | null
             const version = typeof o.version === 'number' ? o.version : 1
             if (op) {
-              for (const rid of [...pendingLocalSkillContext.keys()]) {
-                clearEditTimeout(rid)
-                pendingLocalSkillContext.delete(rid)
+              // If this came from a local skill (/aiedit, /aiimport), try to bind it to the
+              // single in-flight request to avoid applying the proposal to the wrong tab.
+              let boundRequestId: string | undefined
+              let boundFileId: string | undefined
+              let boundFilePath: string | undefined
+              let boundFileName: string | undefined
+              if (pendingLocalSkillContext.size === 1) {
+                boundRequestId = pendingLocalSkillContext.keys().next().value as string
+                const ctx = pendingLocalSkillContext.get(boundRequestId)
+                boundFileId = ctx?.fileId
+                boundFilePath = ctx?.filePath
+                boundFileName = ctx?.fileName
+                clearEditTimeout(boundRequestId)
               }
               // If the assistant outputs an intent JSON envelope, treat it as internal protocol and don't print it.
               set({
                 suppressAssistantFinalIntentJson: false,
                 streaming: '',
-                incomingIntent: { version, intent: intentObj ?? o },
+                incomingIntent: {
+                  requestId: boundRequestId,
+                  version,
+                  intent: intentObj ?? o,
+                  fileId: boundFileId,
+                  filePath: boundFilePath,
+                  fileName: boundFileName,
+                },
               })
+              if (boundRequestId) pendingLocalSkillContext.delete(boundRequestId)
               return
             }
           }
@@ -192,6 +220,9 @@ function buildOpenClawHandlers(
             selTo: number
             fileLen: number
             fileTextSnapshot: string
+            fileId?: string
+            filePath?: string
+            fileName?: string
           }
         | undefined
 
@@ -219,6 +250,14 @@ function buildOpenClawHandlers(
           newText: proposal.newText,
           title: proposal.title ?? 'AI 编辑',
           summary: proposal.summary,
+          fileId: ctx?.fileId,
+          // For tool diff proposals, proposal.summary is typically the path (basename or full).
+          filePath:
+            ctx?.filePath ??
+            (typeof proposal.summary === 'string' && proposal.summary.trim()
+              ? proposal.summary.trim()
+              : undefined),
+          fileName: ctx?.fileName,
           diffMode,
           ...(diffMode === 'selection' && ctx
             ? { selectionFrom: ctx.selFrom, selectionTo: ctx.selTo }
@@ -362,6 +401,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         selTo: hasSel ? selection!.to : 0,
         fileLen: text.length,
         fileTextSnapshot: text,
+        fileId: file.id,
+        filePath: file.path,
+        fileName: file.name,
       })
       clearEditTimeout(id)
       const label = action === 'aiedit' ? '/aiedit' : '/aiimport'

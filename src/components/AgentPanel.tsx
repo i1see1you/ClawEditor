@@ -81,6 +81,8 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
 
   const selection = useEditorStore((s) => s.selection)
 
+  const files = useFileStore((s) => s.files)
+  const setActiveFileId = useFileStore((s) => s.setActiveFileId)
   const updateContent = useFileStore((s) => s.updateContent)
   const markModified = useFileStore((s) => s.markModified)
 
@@ -92,6 +94,30 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   )
 
   const fileText = typeof activeFile?.content === 'string' ? activeFile.content : ''
+
+  const proposalTargetFile = useMemo(() => {
+    if (!pendingProposal?.fileId) return activeFile
+    return files.find((f) => f.id === pendingProposal.fileId) ?? activeFile
+  }, [pendingProposal?.fileId, files, activeFile])
+
+  const proposalTargetFileByPath = useMemo(() => {
+    const pp = pendingProposal
+    if (!pp?.filePath) return undefined
+    const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    const target = norm(pp.filePath)
+    return (
+      files.find((f) => (f.path ? norm(f.path) === target : false)) ??
+      files.find((f) => (f.path ? norm(f.path).endsWith('/' + target) : false)) ??
+      files.find((f) => (f.path ? norm(f.path).split('/').pop() === target.split('/').pop() : false))
+    )
+  }, [pendingProposal, files])
+
+  const effectiveProposalTargetFile = proposalTargetFileByPath ?? proposalTargetFile
+
+  const proposalFileText =
+    typeof effectiveProposalTargetFile?.content === 'string'
+      ? effectiveProposalTargetFile.content
+      : fileText
 
   const inputPlaceholder = useMemo(() => {
     if (!canUseAgent) return '请先打开非 PDF 文本文件以使用 Agent'
@@ -111,7 +137,12 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       p.selectionFrom !== undefined &&
       p.selectionTo !== undefined
     ) {
-      const r = computeSelectionDiffSlices(fileText, p.newText, p.selectionFrom, p.selectionTo)
+      const r = computeSelectionDiffSlices(
+        proposalFileText,
+        p.newText,
+        p.selectionFrom,
+        p.selectionTo
+      )
       if (r.ok) {
         return {
           before: r.before,
@@ -120,17 +151,17 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         }
       }
       return {
-        before: fileText,
+        before: proposalFileText,
         after: p.newText,
         subtitle: '选区外也有变更或未对齐，已显示全文 diff',
       }
     }
     return {
-      before: fileText,
+      before: proposalFileText,
       after: p.newText,
       subtitle: '当前文件 vs 建议内容（全文）',
     }
-  }, [pendingProposal, fileText])
+  }, [pendingProposal, proposalFileText])
 
   const classifyAction = (raw: string): { action: OpenClawAction; instruction: string } => {
     const t = raw.trim()
@@ -345,6 +376,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     if (!activeFile) return null
     return {
       file: {
+        id: activeFile.id,
         name: activeFile.name,
         language: activeFile.language,
         path: activeFile.path,
@@ -523,6 +555,9 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             newText: localResult.newText,
             title: '本地命令',
             summary: localResult.summary,
+            fileId: activeFile?.id,
+            filePath: activeFile?.path,
+            fileName: activeFile?.name,
           })
         }
         return
@@ -576,6 +611,9 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               newText,
               title: '本地命令',
               summary,
+              fileId: activeFile?.id,
+              filePath: activeFile?.path,
+              fileName: activeFile?.name,
             })
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
@@ -614,7 +652,27 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             })
             pushSystem(formatIntentForLog(version, intent))
             const r = applyParsedIntent(fileText, sel, version, intent)
-            handleApplyIntentResult(r)
+            if (r.kind === 'edit') {
+              if (r.newText === fileText) {
+                pushSystem(ansiMsg('\x1b[33m意图未改变文档\x1b[0m'))
+              } else {
+                setPendingProposal({
+                  newText: r.newText,
+                  title: r.title,
+                  summary: r.summary,
+                  fileId: activeFile?.id,
+                  filePath: activeFile?.path,
+                  fileName: activeFile?.name,
+                })
+                pushSystem(
+                  ansiMsg(
+                    '\x1b[33m已生成修改提案：请在弹窗中确认 diff 后再点击「应用修改」。\x1b[0m'
+                  )
+                )
+              }
+            } else {
+              handleApplyIntentResult(r)
+            }
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
             pushSystem(ansiMsg(`\x1b[31m${msg}\x1b[0m`))
@@ -711,22 +769,55 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         ? { from: selection.from, to: selection.to, text: selection.text }
         : null
 
-    const result = applyParsedIntent(fileText, sel, payload.version, payload.intent)
-    handleApplyIntentResult(result, payload.requestId)
+    const baseFile =
+      payload.fileId ? files.find((f) => f.id === payload.fileId) ?? activeFile : activeFile
+    const baseText = typeof baseFile?.content === 'string' ? baseFile.content : fileText
+    const result = applyParsedIntent(baseText, sel, payload.version, payload.intent)
+    if (result.kind === 'edit') {
+      if (result.newText === baseText) {
+        pushSystem(ansiMsg('\x1b[33m意图未改变文档\x1b[0m'))
+      } else {
+        setPendingProposal({
+          requestId: payload.requestId,
+          newText: result.newText,
+          title: result.title,
+          summary: result.summary,
+          fileId: payload.fileId,
+          filePath: payload.filePath,
+          fileName: payload.fileName,
+        })
+        pushSystem(
+          ansiMsg(
+            '\x1b[33m已生成修改提案：请在弹窗中确认 diff 后再点击「应用修改」。\x1b[0m'
+          )
+        )
+      }
+    } else {
+      handleApplyIntentResult(result, payload.requestId)
+    }
   }, [
     incomingIntent,
     takeIncomingIntent,
     canUseAgent,
     activeFile,
     fileText,
+    files,
+    pushSystem,
+    setPendingProposal,
     selection,
     handleApplyIntentResult,
   ])
 
   const applyProposal = () => {
-    if (!activeFile || !pendingProposal) return
-    updateContent(activeFile.id, pendingProposal.newText)
-    markModified(activeFile.id, true)
+    if (!pendingProposal) return
+    const targetId =
+      pendingProposal.fileId ??
+      proposalTargetFileByPath?.id ??
+      effectiveProposalTargetFile?.id ??
+      activeFile?.id
+    if (!targetId) return
+    updateContent(targetId, pendingProposal.newText)
+    markModified(targetId, true)
     clearProposal()
     pushSystem(ansiMsg('\x1b[32m修改已应用\x1b[0m'))
   }
@@ -831,20 +922,38 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         />
       </div>
 
-      {pendingProposal && activeFile ? (
+      {pendingProposal && effectiveProposalTargetFile ? (
         <div className="agent-proposal-overlay" role="dialog" aria-modal="true">
           <div className="agent-proposal-card">
             <div className="agent-proposal-title">
               {pendingProposal.title || '确认修改'}
             </div>
+            {(pendingProposal.fileId || pendingProposal.filePath) &&
+            activeFile &&
+            effectiveProposalTargetFile.id !== activeFile.id ? (
+              <div className="agent-proposal-summary">
+                该提案属于「{effectiveProposalTargetFile.name}」。你当前在「{activeFile.name}」。
+                <button
+                  type="button"
+                  className="agent-btn"
+                  style={{ marginLeft: 8 }}
+                  onClick={() => setActiveFileId(effectiveProposalTargetFile.id)}
+                >
+                  切换到目标文件
+                </button>
+              </div>
+            ) : null}
             {pendingProposal.summary ? (
               <div className="agent-proposal-summary">{pendingProposal.summary}</div>
             ) : null}
             <div className="agent-proposal-diff-wrap">
               <TextDiffView
-                before={proposalDiff?.before ?? fileText}
+                before={proposalDiff?.before ?? proposalFileText}
                 after={proposalDiff?.after ?? pendingProposal.newText}
-                subtitle={proposalDiff?.subtitle ?? '当前文件 vs 建议内容（仅当前文件）'}
+                subtitle={
+                  proposalDiff?.subtitle ??
+                  `${effectiveProposalTargetFile.name} vs 建议内容（应用到目标文件）`
+                }
               />
             </div>
             <div className="agent-proposal-buttons">
