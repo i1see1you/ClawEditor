@@ -61,6 +61,8 @@ export class OpenClawWsChannel {
   /** Tool may stream many `update` events with partial `newText`; debounce before onProposal. */
   private diffProposalDebounceTimer: ReturnType<typeof setTimeout> | null = null
   private pendingDiffProposal: { path: string; newText: string } | null = null
+  /** Local skill (/aiedit, /aiimport) should not use diff/tool proposals; JSON intent only. */
+  private suppressToolDiffForLocalSkill = false
   private url: string
   private manualClose = false
   /**
@@ -416,6 +418,7 @@ export class OpenClawWsChannel {
     }
 
     if (status === 'update') {
+      if (this.suppressToolDiffForLocalSkill) return
       this.tryExtractDiff(payload, 'update')
       return
     }
@@ -425,6 +428,7 @@ export class OpenClawWsChannel {
     }
 
     if (status === 'result' || status === 'done') {
+      if (this.suppressToolDiffForLocalSkill) return
       this.tryExtractDiff(payload, 'final')
     }
   }
@@ -648,6 +652,7 @@ export class OpenClawWsChannel {
     this.turnBuffer = ''
     this.handlers.clearStreaming?.()
     this.cancelPendingDiffProposal()
+    this.suppressToolDiffForLocalSkill = false
 
     const message = this.buildChatInstructionMessage(params)
     await this.deliverGatewayMessage(message)
@@ -672,6 +677,7 @@ export class OpenClawWsChannel {
     this.turnBuffer = ''
     this.handlers.clearStreaming?.()
     this.cancelPendingDiffProposal()
+    this.suppressToolDiffForLocalSkill = true
 
     const message = this.buildLocalSkillGatewayMessage('aiedit', params)
     await this.deliverGatewayMessage(message)
@@ -694,6 +700,7 @@ export class OpenClawWsChannel {
     this.turnBuffer = ''
     this.handlers.clearStreaming?.()
     this.cancelPendingDiffProposal()
+    this.suppressToolDiffForLocalSkill = true
 
     const message = this.buildLocalSkillGatewayMessage('aiimport', params)
     await this.deliverGatewayMessage(message)
@@ -710,7 +717,6 @@ export class OpenClawWsChannel {
       mode: 'full' | 'selection'
     }
   ): string {
-    const gatewayPath = fileNameFromPath(params.file.path)
     const skillBody = getSkillMarkdownBody(skillId)
 
     const lines = [
@@ -720,7 +726,6 @@ export class OpenClawWsChannel {
       skillBody.trim(),
       '',
       `file: ${params.file.name} (${params.file.language})`,
-      `path: ${gatewayPath}`,
       '',
       `mode: ${params.mode}`,
       '',
@@ -735,7 +740,7 @@ export class OpenClawWsChannel {
         params.text,
         '--- end full document ---',
         '',
-        'Respond with the JSON intent as described in the skill, or use the editor diff preview tool without writing disk.'
+        'Respond with the JSON intent as described in the skill (JSON only).'
       )
     } else if (params.selection && params.selection.from !== params.selection.to) {
       const sel = params.selection
@@ -754,7 +759,7 @@ export class OpenClawWsChannel {
         params.text,
         '--- end full document ---',
         '',
-        'Apply the instruction to this selection; output JSON per the skill, or merged full file via the editor diff tool — never write disk.',
+        'Apply the instruction to this selection; output JSON per the skill (JSON only).',
       )
       const ctx = getContextLinesAroundCursor(params.text, params.cursorPos, 8, 8)
       lines.push(

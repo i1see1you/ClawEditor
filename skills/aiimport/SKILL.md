@@ -9,10 +9,10 @@ description: Import external text into the editor buffer using only the four loc
 
 ## 输出形式
 
-仅输出 **一个 JSON 对象**（无其它文字、无 markdown 围栏）：
+仅输出 **一个 JSON 对象**（无其它文字、无 markdown 围栏），并且 **字段必须放在顶层**：
 
 ```json
-{ "version": 1, "intent": { "op": "insert", "at": 0, "text": "…" } }
+{ "version": 1, "op": "insert", "at": 0, "text": "…" }
 ```
 
 ## 允许的 `op`（与 `/aiedit` 相同，仅此四种）

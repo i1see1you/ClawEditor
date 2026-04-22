@@ -184,10 +184,19 @@ function buildOpenClawHandlers(
                 boundFileName = ctx?.fileName
                 clearEditTimeout(boundRequestId)
               }
-              // If the assistant outputs an intent JSON envelope, treat it as internal protocol and don't print it.
-              set({
+              // Print raw JSON for debugging (command output window).
+              const debugId = `dbg-intent-${Date.now()}`
+              set((s) => ({
                 suppressAssistantFinalIntentJson: false,
                 streaming: '',
+                messages: [
+                  ...s.messages,
+                  {
+                    id: debugId,
+                    role: 'system' as const,
+                    content: `OpenClaw intent JSON:\n${t}`,
+                  },
+                ],
                 incomingIntent: {
                   requestId: boundRequestId,
                   version,
@@ -196,7 +205,7 @@ function buildOpenClawHandlers(
                   filePath: boundFilePath,
                   fileName: boundFileName,
                 },
-              })
+              }))
               if (boundRequestId) pendingLocalSkillContext.delete(boundRequestId)
               return
             }

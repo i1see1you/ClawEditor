@@ -9,13 +9,7 @@ ClawEditor 会把「当前缓冲区的全文或选区 + 用户指令」发给 Op
 
 ## 你必须输出的形式
 
-回复中 **只包含一个 JSON 对象**（不要有其它解释性文字，不要用 markdown 代码块包裹），形如：
-
-```json
-{ "version": 1, "intent": { "op": "replace_file", "text": "…" } }
-```
-
-也可以把字段放在顶层（兼容）：
+回复中 **只包含一个 JSON 对象**（不要有其它解释性文字，不要用 markdown 代码块包裹），并且 **字段必须放在顶层**，形如：
 
 ```json
 { "version": 1, "op": "replace_file", "text": "…" }
