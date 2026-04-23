@@ -1,6 +1,7 @@
 ---
 name: aiimport
 description: Import content into the editor buffer. When importing a local file, ClawEditor sends only the local file path; OpenClaw Gateway must read the file and extract visible text (PDF/Word/RTF) before emitting the four local JSON ops.
+kind: local_intent_four_op
 ---
 
 ```help

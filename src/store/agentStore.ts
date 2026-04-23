@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { OpenClawAction } from '../openclaw/types'
 import { OpenClawWsChannel } from '../openclaw/wsChannel'
+import { getSkillDef } from '../skills/skillRegistry'
 
 export type AgentConnection = 'idle' | 'connecting' | 'open' | 'error'
 
@@ -8,7 +9,7 @@ const OPENCLAW_EDIT_TIMEOUT_MS = 10_000
 const OPENCLAW_LOCAL_SKILL_TIMEOUT_MS = 120_000
 const openclawEditTimeouts = new Map<string, number>()
 
-/** Per-request context for `/aiedit` and `/aiimport` — selection diff metadata for onProposal. */
+/** Per-request context for local skill flows — selection diff metadata for onProposal. */
 const pendingLocalSkillContext = new Map<
   string,
   {
@@ -112,6 +113,7 @@ interface AgentState {
   disconnect: () => Promise<void>
   send: (params: {
     action: OpenClawAction
+    skillId?: string
     instruction: string
     file: { id?: string; name: string; language: string; path: string }
     text: string
@@ -370,6 +372,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   send: async ({
     action,
+    skillId,
     instruction,
     file,
     text,
@@ -401,7 +404,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       openclawEditTimeouts.set(id, timer)
     }
 
-    const localSkill = action === 'aiedit' || action === 'aiimport'
+    const localSkill = action === 'skill'
     if (localSkill) {
       const hasSel = Boolean(selection && selection.from !== selection.to)
       pendingLocalSkillContext.set(id, {
@@ -415,7 +418,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         fileName: file.name,
       })
       clearEditTimeout(id)
-      const label = action === 'aiedit' ? '/aiedit' : '/aiimport'
+      const label = skillId ? `/${skillId}` : '/skill'
       const timer = window.setTimeout(() => {
         if (openclawEditTimeouts.get(id) === timer) {
           openclawEditTimeouts.delete(id)
@@ -429,7 +432,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
 
     try {
-      if (action === 'aiedit' || action === 'aiimport') {
+      if (action === 'skill') {
+        if (!skillId) throw new Error('缺少 skillId')
+        const def = getSkillDef(skillId)
+        if (!def) throw new Error(`未知 skill: ${skillId}`)
+        if (def.kind !== 'local_intent_four_op') {
+          await c.sendChatMessage({ instruction, file, text, cursorPos, selection })
+          return true
+        }
         const hasSel = Boolean(selection && selection.from !== selection.to)
         const shared = {
           instruction,
@@ -439,11 +449,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           selection,
           mode: hasSel ? ('selection' as const) : ('full' as const),
         }
-        if (action === 'aiedit') {
-          await c.sendAiEditMessage(shared)
-        } else {
-          await c.sendAiImportMessage(shared)
-        }
+        await c.sendLocalSkillMessage(skillId, shared)
       } else {
         await c.sendChatMessage({ instruction, file, text, cursorPos, selection })
       }

@@ -1,6 +1,7 @@
 /**
  * Slash-command palette data (/aiedit, /aiimport, /edit …) for AgentChatInput.
  */
+import { getAllSkillMetas } from '../skills/skillRegistry'
 
 export type PaletteItem = {
   id: string
@@ -12,18 +13,12 @@ export type PaletteItem = {
 }
 
 export const ROOT_COMMANDS: PaletteItem[] = [
-  {
-    id: 'aiedit',
-    label: '/aiedit',
-    description: '按 skills/aiedit 经 Gateway 改写（JSON op 或 diff）',
-    insertFromSlash: '/aiedit ',
-  },
-  {
-    id: 'aiimport',
-    label: '/aiimport',
-    description: '按 skills/aiimport 导入外部内容到当前缓冲',
-    insertFromSlash: '/aiimport ',
-  },
+  ...getAllSkillMetas().map((s) => ({
+    id: s.id,
+    label: `/${s.id}`,
+    description: s.description || `来自 skills/${s.id}/SKILL.md`,
+    insertFromSlash: `/${s.id} `,
+  })),
   {
     id: 'edit',
     label: '/edit',
@@ -111,7 +106,10 @@ function filterItems(items: PaletteItem[], q: string): PaletteItem[] {
 
 /** True when user has moved past the palette-only prefix for aiedit/aiimport. */
 function isAfterRemoteCommandBody(lineFromSlash: string): boolean {
-  return /\/(aiedit|aiimport)\s+\S/.test(lineFromSlash)
+  const m = lineFromSlash.match(/^\/([a-zA-Z0-9_-]+)\s+\S/)
+  if (!m) return false
+  const id = (m[1] ?? '').toLowerCase()
+  return Boolean(getAllSkillMetas().some((s) => s.id === id))
 }
 
 export function getPaletteState(value: string, cursorPos: number): PaletteState {

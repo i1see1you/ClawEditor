@@ -65,7 +65,7 @@ function extractClaweditorConfigBlock(markdown: string): string | null {
 }
 
 export function getClaweditorConfigForSkill(
-  skillId: 'aiedit' | 'aiimport'
+  skillId: string
 ): ClawEditorConfig | null {
   const body = getSkillMarkdownBody(skillId)
   const raw = extractClaweditorConfigBlock(body)

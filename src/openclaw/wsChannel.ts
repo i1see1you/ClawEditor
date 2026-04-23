@@ -659,9 +659,12 @@ export class OpenClawWsChannel {
   }
 
   /**
-   * `/aiedit`: skill markdown from `skills/aiedit/SKILL.md` + buffer payload. Model should answer with JSON (four local ops) and/or editor diff tool.
+   * Local skill: skill markdown from `skills/<id>/SKILL.md` + buffer payload.
+   * For `local_intent_four_op` skills, model should answer with JSON (four local ops).
    */
-  async sendAiEditMessage(params: {
+  async sendLocalSkillMessage(
+    skillId: string,
+    params: {
     instruction: string
     file: { name: string; language: string; path: string }
     text: string
@@ -679,35 +682,12 @@ export class OpenClawWsChannel {
     this.cancelPendingDiffProposal()
     this.suppressToolDiffForLocalSkill = true
 
-    const message = this.buildLocalSkillGatewayMessage('aiedit', params)
-    await this.deliverGatewayMessage(message)
-  }
-
-  /** `/aiimport`: skill from `skills/aiimport/SKILL.md`. */
-  async sendAiImportMessage(params: {
-    instruction: string
-    file: { name: string; language: string; path: string }
-    text: string
-    cursorPos: number
-    selection: { text: string; from: number; to: number } | null
-    mode: 'full' | 'selection'
-  }): Promise<void> {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error('WebSocket 未连接')
-    }
-
-    this.activeFilePath = params.file.path
-    this.turnBuffer = ''
-    this.handlers.clearStreaming?.()
-    this.cancelPendingDiffProposal()
-    this.suppressToolDiffForLocalSkill = true
-
-    const message = this.buildLocalSkillGatewayMessage('aiimport', params)
+    const message = this.buildLocalSkillGatewayMessage(skillId, params)
     await this.deliverGatewayMessage(message)
   }
 
   private buildLocalSkillGatewayMessage(
-    skillId: 'aiedit' | 'aiimport',
+    skillId: string,
     params: {
       instruction: string
       file: { name: string; language: string; path: string }

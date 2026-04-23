@@ -20,7 +20,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { stat } from '@tauri-apps/plugin-fs'
 import { getClaweditorConfigForSkill, validateClaweditorConfig } from '../skills/claweditorConfig'
 import { runSkillCompletions } from '../skills/completionEngine'
-import { getSkillMarkdownBody } from '../skills/resolveSkill'
+import { getSkillDef, getSkillHelpText } from '../skills/skillRegistry'
 
 interface AgentPanelProps {
   activeFile: FileTab | undefined
@@ -471,203 +471,166 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           : null
       const cursorPos = selection?.from ?? 0
 
-      const aieditMatch = trimmed.match(/^\/aiedit(?:\s+([\s\S]*))?$/i)
-      if (aieditMatch) {
-        const rest = (aieditMatch[1] ?? '').trim()
-        const showHelp = () => {
-          const md = getSkillMarkdownBody('aiedit')
-          const m = md.match(/```help\s*\r?\n([\s\S]*?)\r?\n```/i)
-          return (m?.[1] ?? '未在 skills/aiedit/SKILL.md 中找到 help 文档块。').trim()
-        }
-        if (!rest || /^help$/i.test(rest) || /^h$/i.test(rest) || /^帮助$/.test(rest)) {
-          useAgentStore.setState({ lastError: null })
-          pushSystem(showHelp())
-          return
-        }
-        if (!wsUrl.trim()) {
-          pushSystem(ansiMsg('\x1b[31m请填写 Gateway 地址。\x1b[0m'))
-          return
-        }
-        if (connection !== 'open') {
-          pushSystem(ansiMsg('\x1b[31m未连接 OpenClaw Gateway。请先连接。\x1b[0m'))
-          return
-        }
-        void (async () => {
-          useAgentStore.setState({ lastError: null })
-          const ok = await send({
-            action: 'aiedit',
-            instruction: rest,
-            ...contextForSend!,
-          })
-          if (!ok) {
-            pushSystem(
-              ansiMsg(
-                '\x1b[31m请求未能发出（未连接或网关拒绝）。请查看工具栏状态与系统消息。\x1b[0m'
-              )
-            )
+      const skillMatch = trimmed.match(/^\/([a-zA-Z0-9_-]+)(?:\s+([\s\S]*))?$/)
+      if (skillMatch) {
+        const skillId = (skillMatch[1] ?? '').toLowerCase()
+        const rest = (skillMatch[2] ?? '').trim()
+        const def = getSkillDef(skillId)
+        if (def) {
+          const wantsExplicitHelp =
+            /^help$/i.test(rest) || /^h$/i.test(rest) || /^帮助$/.test(rest)
+          if (!wsUrl.trim()) {
+            pushSystem(ansiMsg('\x1b[31m请填写 Gateway 地址。\x1b[0m'))
+            return
           }
-        })()
-        return
-      }
+          if (connection !== 'open') {
+            pushSystem(ansiMsg('\x1b[31m未连接 OpenClaw Gateway。请先连接。\x1b[0m'))
+            return
+          }
+          void (async () => {
+            useAgentStore.setState({ lastError: null })
+            const cfgAll = getClaweditorConfigForSkill(skillId)
+            const hasCompletions = Boolean(cfgAll?.completions && cfgAll.completions.length > 0)
 
-      const aiimportMatch = trimmed.match(/^\/aiimport(?:\s+([\s\S]*))?$/i)
-      if (aiimportMatch) {
-        const rest = (aiimportMatch[1] ?? '').trim()
-        if (/^help$/i.test(rest) || /^h$/i.test(rest) || /^帮助$/.test(rest)) {
-          useAgentStore.setState({ lastError: null })
-          const md = getSkillMarkdownBody('aiimport')
-          const m = md.match(/```help\s*\r?\n([\s\S]*?)\r?\n```/i)
-          pushSystem((m?.[1] ?? '未在 skills/aiimport/SKILL.md 中找到 help 文档块。').trim())
-          return
-        }
-        if (!wsUrl.trim()) {
-          pushSystem(ansiMsg('\x1b[31m请填写 Gateway 地址。\x1b[0m'))
-          return
-        }
-        if (connection !== 'open') {
-          pushSystem(ansiMsg('\x1b[31m未连接 OpenClaw Gateway。请先连接。\x1b[0m'))
-          return
-        }
-        void (async () => {
-          useAgentStore.setState({ lastError: null })
-          const cfgAll = getClaweditorConfigForSkill('aiimport')
-          if (cfgAll) {
-            const v = validateClaweditorConfig(cfgAll as any)
-            if (!v.ok) {
+            // Empty rest: prefer completions when present; otherwise show help.
+            if (!rest && !hasCompletions) {
+              useAgentStore.setState({ lastError: null })
               pushSystem(
-                ansiMsg(
-                  `\x1b[31mclaweditor 配置错误（skills/aiimport/SKILL.md）:\n- ${v.errors.join('\n- ')}\x1b[0m`
-                )
+                getSkillHelpText(skillId) ?? `未在 skills/${skillId}/SKILL.md 中找到 help 文档块。`
               )
+              return
+            }
+            if (wantsExplicitHelp) {
+              useAgentStore.setState({ lastError: null })
+              pushSystem(
+                getSkillHelpText(skillId) ?? `未在 skills/${skillId}/SKILL.md 中找到 help 文档块。`
+              )
+              return
+            }
+            if (cfgAll) {
+              const v = validateClaweditorConfig(cfgAll as any)
+              if (!v.ok) {
+                pushSystem(
+                  ansiMsg(
+                    `\x1b[31mclaweditor 配置错误（skills/${skillId}/SKILL.md）:\n- ${v.errors.join('\n- ')}\x1b[0m`
+                  )
+                )
+                if (v.warnings.length) {
+                  pushSystem(ansiMsg(`\x1b[33m配置警告:\n- ${v.warnings.join('\n- ')}\x1b[0m`))
+                }
+                return
+              }
               if (v.warnings.length) {
                 pushSystem(ansiMsg(`\x1b[33m配置警告:\n- ${v.warnings.join('\n- ')}\x1b[0m`))
               }
-              return
             }
-            if (v.warnings.length) {
-              pushSystem(ansiMsg(`\x1b[33m配置警告:\n- ${v.warnings.join('\n- ')}\x1b[0m`))
-            }
-          }
 
-          const runAction = async (a: any) => {
-            const action = a?.action as string
-            if (action === 'one_select') {
-              const title = a?.ui?.title ?? '选择'
-              const options =
-                (a?.options as { id: string; label: string }[] | undefined) ?? []
-              return await new Promise<Record<string, string> | null>((resolve) => {
-                setActionModal({
-                  kind: 'one_select',
-                  title,
-                  options,
-                  resolve: (v) => resolve(v ? { id: v } : null),
+            const runAction = async (a: any) => {
+              const action = a?.action as string
+              if (action === 'one_select') {
+                const title = a?.ui?.title ?? '选择'
+                const options =
+                  (a?.options as { id: string; label: string }[] | undefined) ?? []
+                return await new Promise<Record<string, string> | null>((resolve) => {
+                  setActionModal({
+                    kind: 'one_select',
+                    title,
+                    options,
+                    resolve: (v) => resolve(v ? { id: v } : null),
+                  })
                 })
-              })
-            }
-            if (action === 'prompt_user') {
-              const title = a?.ui?.title ?? '请输入'
-              const placeholder = a?.ui?.placeholder
-              return await new Promise<Record<string, string> | null>((resolve) => {
-                setActionModal({
-                  kind: 'prompt',
-                  title,
-                  placeholder,
-                  resolve: (v) => resolve(v === null ? null : { text: v.trim() }),
+              }
+              if (action === 'prompt_user') {
+                const title = a?.ui?.title ?? '请输入'
+                const placeholder = a?.ui?.placeholder
+                return await new Promise<Record<string, string> | null>((resolve) => {
+                  setActionModal({
+                    kind: 'prompt',
+                    title,
+                    placeholder,
+                    resolve: (v) => resolve(v === null ? null : { text: v.trim() }),
+                  })
                 })
+              }
+              if (action === 'pick_file') {
+                const title = a?.ui?.title ?? '选择文件'
+                const hardMax = 20 * 1024 * 1024
+                const maxBytes = Math.min(
+                  typeof a?.maxBytes === 'number' ? a.maxBytes : 20 * 1024 * 1024,
+                  hardMax
+                )
+                const selected = await open({ multiple: false, title })
+                if (!selected || Array.isArray(selected)) return null
+                const path = String(selected)
+                const name = path.split('/').pop() || path
+                const st = await stat(path).catch(() => null)
+                if (st && typeof st.size === 'number' && st.size > maxBytes) {
+                  throw new Error(`导入文件过大（>${maxBytes} bytes）`)
+                }
+                return { name, path }
+              }
+              if (action === 'clipboard_read') {
+                const hardMax = 500_000
+                const maxChars = Math.min(
+                  typeof a?.maxChars === 'number' ? a.maxChars : 200_000,
+                  hardMax
+                )
+                if (typeof navigator === 'undefined' || !navigator.clipboard?.readText) {
+                  throw new Error('当前环境无法读取剪贴板（需安全上下文与权限）。')
+                }
+                const content = await navigator.clipboard.readText()
+                if (content.length > maxChars) {
+                  throw new Error(`剪贴板内容过长（>${maxChars} chars）`)
+                }
+                return { content }
+              }
+              throw new Error(`不支持的 action: ${action}`)
+            }
+
+            let instruction = rest
+            if (cfgAll?.completions?.length) {
+              const r = await runSkillCompletions({
+                args: cfgAll?.args,
+                completions: cfgAll?.completions,
+                instructionWrapper: cfgAll?.instructionWrapper,
+                ctx: { rest, instruction: rest },
+                runAction: async (a) => {
+                  try {
+                    return await runAction(a)
+                  } catch (e) {
+                    const msg = e instanceof Error ? e.message : String(e)
+                    pushSystem(ansiMsg(`\x1b[31m补全失败: ${msg}\x1b[0m`))
+                    return null
+                  }
+                },
               })
-            }
-            if (action === 'pick_file') {
-              const title = a?.ui?.title ?? '选择文件'
-              const hardMax = 20 * 1024 * 1024
-              const maxBytes = Math.min(
-                typeof a?.maxBytes === 'number' ? a.maxBytes : 20 * 1024 * 1024,
-                hardMax
-              )
-              const selected = await open({ multiple: false, title })
-              if (!selected || Array.isArray(selected)) return null
-              const path = String(selected)
-              const name = path.split('/').pop() || path
-              const st = await stat(path).catch(() => null)
-              if (st && typeof st.size === 'number' && st.size > maxBytes) {
-                throw new Error(`导入文件过大（>${maxBytes} bytes）`)
+              if (!r.ok) {
+                if ('cancelled' in r && r.cancelled) {
+                  pushSystem(ansiMsg(`\x1b[33m已取消 /${skillId}。\x1b[0m`))
+                } else {
+                  pushSystem(ansiMsg(`\x1b[31m${(r as any).error}\x1b[0m`))
+                }
+                return
               }
-              // B plan: only pass the local path to Gateway; Gateway reads & converts.
-              return { name, path }
+              instruction = r.instruction
             }
-            if (action === 'clipboard_read') {
-              const hardMax = 500_000
-              const maxChars = Math.min(
-                typeof a?.maxChars === 'number' ? a.maxChars : 200_000,
-                hardMax
-              )
-              if (typeof navigator === 'undefined' || !navigator.clipboard?.readText) {
-                throw new Error('当前环境无法读取剪贴板（需安全上下文与权限）。')
-              }
-              const content = await navigator.clipboard.readText()
-              if (content.length > maxChars) {
-                throw new Error(`剪贴板内容过长（>${maxChars} chars）`)
-              }
-              return { content }
-            }
-            throw new Error(`不支持的 action: ${action}`)
-          }
 
-          const r = await runSkillCompletions({
-            args: cfgAll?.args,
-            completions: cfgAll?.completions,
-            instructionWrapper: cfgAll?.instructionWrapper,
-            ctx: { rest, instruction: rest },
-            runAction: async (a) => {
-              try {
-                return await runAction(a)
-              } catch (e) {
-                const msg = e instanceof Error ? e.message : String(e)
-                pushSystem(ansiMsg(`\x1b[31m补全失败: ${msg}\x1b[0m`))
-                return null
-              }
-            },
-          })
-          if (!r.ok) {
-            if ('cancelled' in r && r.cancelled) {
-              pushSystem(ansiMsg('\x1b[33m已取消 /aiimport。\x1b[0m'))
-            } else {
-              pushSystem(ansiMsg(`\x1b[31m${(r as any).error}\x1b[0m`))
+            const ok = await send({
+              action: 'skill',
+              skillId,
+              instruction,
+              ...contextForSend!,
+            })
+            if (!ok) {
+              pushSystem(
+                ansiMsg(
+                  '\x1b[31m请求未能发出（未连接或网关拒绝）。请查看工具栏状态与系统消息。\x1b[0m'
+                )
+              )
             }
-            return
-          }
-          if (r.trace.length) {
-            pushSystem(
-              ansiMsg(
-                `\x1b[36m补全轨迹（/aiimport）:\n${r.trace
-                  .map((s) =>
-                    s.injected
-                      ? `- ${s.ruleId}: ${s.action} → ${s.injected.into} (+${s.injected.chars} chars)`
-                      : `- ${s.ruleId}: ${s.action}`
-                  )
-                  .join('\n')}\x1b[0m`
-              )
-            )
-          }
-          pushSystem(
-            ansiMsg(
-              `\x1b[36m补全后的 instruction（预览，前 800 字）:\n${r.instruction.slice(0, 800)}\x1b[0m`
-            )
-          )
-
-          const ok = await send({
-            action: 'aiimport',
-            instruction: r.instruction,
-            ...contextForSend!,
-          })
-          if (!ok) {
-            pushSystem(
-              ansiMsg(
-                '\x1b[31m请求未能发出（未连接或网关拒绝）。请查看工具栏状态与系统消息。\x1b[0m'
-              )
-            )
-          }
-        })()
-        return
+          })()
+          return
+        }
       }
 
       const localResult = parseLocalEdit(fileText, trimmed, sel, cursorPos)

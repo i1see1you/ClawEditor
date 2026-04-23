@@ -1,6 +1,7 @@
 ---
 name: aiedit
 description: AI-assisted local edit for ClawEditor — model output must be JSON only (four local edit ops).
+kind: local_intent_four_op
 ---
 
 ```help

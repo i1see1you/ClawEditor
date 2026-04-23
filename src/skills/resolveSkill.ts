@@ -1,4 +1,5 @@
 import { BUILTIN_SKILL_MARKDOWN } from './builtinMarkdown'
+import { getSkillMarkdownBodyById } from './skillRegistry'
 
 const OVERRIDE_PREFIX = 'claweditor.skill.override.'
 
@@ -15,12 +16,16 @@ export function stripSkillFrontmatter(raw: string): string {
 /**
  * Builtin and user override: `localStorage[claweditor.skill.override.<id>]` replaces bundled markdown.
  */
-export function getSkillMarkdownBody(skillId: 'aiedit' | 'aiimport'): string {
+export function getSkillMarkdownBody(skillId: string): string {
   if (typeof localStorage !== 'undefined') {
     const o = localStorage.getItem(`${OVERRIDE_PREFIX}${skillId}`)
     if (o?.trim()) {
       return stripSkillFrontmatter(o)
     }
   }
-  return stripSkillFrontmatter(BUILTIN_SKILL_MARKDOWN[skillId])
+  const fromRegistry = getSkillMarkdownBodyById(skillId)
+  if (fromRegistry) return fromRegistry
+  const raw = BUILTIN_SKILL_MARKDOWN[skillId]
+  if (raw) return stripSkillFrontmatter(raw)
+  return ''
 }
