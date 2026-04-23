@@ -3,6 +3,19 @@ name: aiedit
 description: AI-assisted local edit for ClawEditor — model output must be JSON only (four local edit ops).
 ---
 
+```help
+用法：/aiedit <自然语言指令>
+
+说明：
+- 由 OpenClaw 按 skills/aiedit/SKILL.md 协议生成本地 JSON 意图（四种本地 op）。
+- 无选区：附带全文，确认时为全文 diff。
+- 有选区：发送选区与全文，确认时可仅 diff 选区。
+- 需已连接 OpenClaw Gateway。
+
+示例：
+- /aiedit 把语气改得更正式
+```
+
 # ClawEditor `/aiedit`（本地编辑意图）
 
 ClawEditor 会把「当前缓冲区的全文或选区 + 用户指令」发给 OpenClaw Gateway。**不要**直接写入磁盘；**不要**把磁盘上的文件当作真实来源（缓冲区可能有未保存修改）。

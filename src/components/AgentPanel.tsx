@@ -17,9 +17,10 @@ import {
   tryParseInsertAppendBody,
 } from '../utils/parseEditInsertAppend'
 import { open } from '@tauri-apps/plugin-dialog'
-import { readTextFile, stat } from '@tauri-apps/plugin-fs'
-import { getClaweditorConfigForSkill, validateClaweditorConfig, type ViImportUiConfig } from '../skills/claweditorConfig'
+import { stat } from '@tauri-apps/plugin-fs'
+import { getClaweditorConfigForSkill, validateClaweditorConfig } from '../skills/claweditorConfig'
 import { runSkillCompletions } from '../skills/completionEngine'
+import { getSkillMarkdownBody } from '../skills/resolveSkill'
 
 interface AgentPanelProps {
   activeFile: FileTab | undefined
@@ -473,18 +474,14 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       const aieditMatch = trimmed.match(/^\/aiedit(?:\s+([\s\S]*))?$/i)
       if (aieditMatch) {
         const rest = (aieditMatch[1] ?? '').trim()
-        const helpText = [
-          '用法：/aiedit <自然语言指令>',
-          '',
-          '  由 OpenClaw 按 skills/aiedit/SKILL.md 协议改写；回复应为 JSON（四种本地 op）或由 Gateway diff 工具给出合并全文；需已连接 Gateway。',
-          '  无选区：附带全文，确认时为全文 diff。',
-          '  有选区：发送选区与全文，确认时可仅 diff 选区。',
-          '',
-          '  示例：/aiedit 把语气改得更正式',
-        ].join('\n')
+        const showHelp = () => {
+          const md = getSkillMarkdownBody('aiedit')
+          const m = md.match(/```help\s*\r?\n([\s\S]*?)\r?\n```/i)
+          return (m?.[1] ?? '未在 skills/aiedit/SKILL.md 中找到 help 文档块。').trim()
+        }
         if (!rest || /^help$/i.test(rest) || /^h$/i.test(rest) || /^帮助$/.test(rest)) {
           useAgentStore.setState({ lastError: null })
-          pushSystem(helpText)
+          pushSystem(showHelp())
           return
         }
         if (!wsUrl.trim()) {
@@ -516,20 +513,11 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       const aiimportMatch = trimmed.match(/^\/aiimport(?:\s+([\s\S]*))?$/i)
       if (aiimportMatch) {
         const rest = (aiimportMatch[1] ?? '').trim()
-        const helpText = [
-          '用法：/aiimport  或  /aiimport <位置说明（可选）>',
-          '',
-          '  按 skills/aiimport/SKILL.md 将外部内容导入当前缓冲；模型仅输出 JSON（四种本地 op）。',
-          '  默认在文末追加；仅在命令行里写明光标/选区/整篇替换等要求时才改插入位置。',
-          '  若缺少导入源参数，将按 skill 的补全规则自动弹窗补全。',
-          '  需已连接 Gateway。',
-          '',
-          '  示例：/aiimport',
-          '  示例：/aiimport 在光标处插入',
-        ].join('\n')
         if (/^help$/i.test(rest) || /^h$/i.test(rest) || /^帮助$/.test(rest)) {
           useAgentStore.setState({ lastError: null })
-          pushSystem(helpText)
+          const md = getSkillMarkdownBody('aiimport')
+          const m = md.match(/```help\s*\r?\n([\s\S]*?)\r?\n```/i)
+          pushSystem((m?.[1] ?? '未在 skills/aiimport/SKILL.md 中找到 help 文档块。').trim())
           return
         }
         if (!wsUrl.trim()) {
@@ -543,7 +531,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         void (async () => {
           useAgentStore.setState({ lastError: null })
           const cfgAll = getClaweditorConfigForSkill('aiimport')
-          const cfg = cfgAll?.viimport as ViImportUiConfig | undefined
           if (cfgAll) {
             const v = validateClaweditorConfig(cfgAll as any)
             if (!v.ok) {
@@ -565,11 +552,9 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           const runAction = async (a: any) => {
             const action = a?.action as string
             if (action === 'one_select') {
-              const title = a?.ui?.title ?? cfg?.sourceSelectTitle ?? '选择'
+              const title = a?.ui?.title ?? '选择'
               const options =
-                (a?.options as { id: string; label: string }[] | undefined) ??
-                cfg?.sourceSelectOptions ??
-                []
+                (a?.options as { id: string; label: string }[] | undefined) ?? []
               return await new Promise<Record<string, string> | null>((resolve) => {
                 setActionModal({
                   kind: 'one_select',
@@ -580,8 +565,8 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               })
             }
             if (action === 'prompt_user') {
-              const title = a?.ui?.title ?? cfg?.promptTitle ?? '请输入'
-              const placeholder = a?.ui?.placeholder ?? cfg?.promptPlaceholder
+              const title = a?.ui?.title ?? '请输入'
+              const placeholder = a?.ui?.placeholder
               return await new Promise<Record<string, string> | null>((resolve) => {
                 setActionModal({
                   kind: 'prompt',
@@ -592,10 +577,10 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               })
             }
             if (action === 'pick_file') {
-              const title = a?.ui?.title ?? cfg?.pickFileTitle ?? '选择文件'
-              const hardMax = 5_000_000
+              const title = a?.ui?.title ?? '选择文件'
+              const hardMax = 20 * 1024 * 1024
               const maxBytes = Math.min(
-                typeof a?.maxBytes === 'number' ? a.maxBytes : 1_048_576,
+                typeof a?.maxBytes === 'number' ? a.maxBytes : 20 * 1024 * 1024,
                 hardMax
               )
               const selected = await open({ multiple: false, title })
@@ -606,8 +591,8 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               if (st && typeof st.size === 'number' && st.size > maxBytes) {
                 throw new Error(`导入文件过大（>${maxBytes} bytes）`)
               }
-              const content = await readTextFile(path)
-              return { name, content }
+              // B plan: only pass the local path to Gateway; Gateway reads & converts.
+              return { name, path }
             }
             if (action === 'clipboard_read') {
               const hardMax = 500_000

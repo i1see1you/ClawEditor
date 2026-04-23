@@ -8,7 +8,7 @@
 - **`args`**: 参数检测与缺参判定（可选）
 - **`completions`**: 补全规则列表（可选）
 - **`instructionWrapper`**: 最终 instruction 外层包装（可选）
-- **`viimport`**: UI 文案（可选；历史遗留字段，建议不再使用）
+- **`/aiimport`（按路径读取）**：ClawEditor 在选择文件后向 instruction 注入 `path: ...`；Gateway 需读取该路径并解析（PDF/Word/RTF 抽取可见文字）后再生成意图 JSON（见 `skills/aiimport/SKILL.md`）。
 
 ### `args`
 

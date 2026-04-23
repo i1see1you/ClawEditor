@@ -1,13 +1,5 @@
 import { getSkillMarkdownBody } from './resolveSkill'
 
-export type ViImportUiConfig = {
-  pickFileTitle?: string
-  promptTitle?: string
-  promptPlaceholder?: string
-  sourceSelectTitle?: string
-  sourceSelectOptions?: { id: 'file' | 'clipboard'; label: string }[]
-}
-
 export type CompletionAction =
   | {
       action: 'pick_file'
@@ -58,7 +50,6 @@ export type ArgsSpec = Record<
 
 type ClawEditorConfig = {
   version: 1
-  viimport?: ViImportUiConfig
   args?: ArgsSpec
   completions?: CompletionRule[]
   instructionWrapper?: {
