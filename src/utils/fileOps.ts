@@ -1,4 +1,4 @@
-import { open, save, message } from '@tauri-apps/plugin-dialog'
+import { open, save, message, confirm } from '@tauri-apps/plugin-dialog'
 import { readTextFile, readFile, stat } from '@tauri-apps/plugin-fs'
 import type { FileHandle } from '../types'
 
@@ -136,6 +136,28 @@ export async function notify(options: {
     await message(options.message, { title: options.title, kind: options.kind ?? 'info' })
   } catch (err) {
     console.error('Failed to show message dialog:', err)
+  }
+}
+
+/** Ok/Cancel: export only the first `maxLines` lines. Returns false on cancel or dialog error. */
+export async function confirmTruncatedPdfExport(options: {
+  totalLines: number
+  maxLines: number
+}): Promise<boolean> {
+  const { totalLines, maxLines } = options
+  try {
+    return await confirm(
+      `当前文件共 ${totalLines} 行，超过 PDF 导出上限（${maxLines} 行）。\n\n是否仅导出前 ${maxLines} 行并继续？`,
+      {
+        title: '导出 PDF',
+        kind: 'warning',
+        okLabel: '继续导出',
+        cancelLabel: '取消',
+      },
+    )
+  } catch (err) {
+    console.error('Failed to show confirm dialog:', err)
+    return false
   }
 }
 

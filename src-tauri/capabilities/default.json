@@ -12,6 +12,7 @@
     "fs:allow-write-file",
     "fs:allow-stat",
     "dialog:default",
+    "dialog:allow-confirm",
     "dialog:allow-open",
     "dialog:allow-save"
   ]

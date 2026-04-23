@@ -16,14 +16,20 @@ import {
   openFile,
   detectLanguage,
   notify,
+  confirmTruncatedPdfExport,
   pickSavePdfPath,
   saveBinaryFile,
   saveFile,
   getFileDiskBaseline,
 } from './utils/fileOps'
 import { exportHtmlToPdfBytes } from './utils/exportPdf'
+import { buildPdfSourceHtml, MAX_PDF_SYNTAX_HIGHLIGHT_LINES } from './utils/pdfHighlight'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
+
+const MAX_PDF_EXPORT_LINES = MAX_PDF_SYNTAX_HIGHLIGHT_LINES
+/** Narrow no-break space between digits (same as product copy). */
+const PDF_TRUNC_TAIL_NOTICE = '本 PDF 仅包含原文前 10\u202F000 行。'
 
 function App() {
   const { files, activeFileId, setActiveFileId } = useFileStore()
@@ -73,7 +79,10 @@ function App() {
     typeof activeFile?.content === 'string' &&
     Boolean(activeFile?.path)
   const canDiff = canSave
-  const canExportPdf = activeFile?.language === 'markdown' || activeFile?.language === 'html'
+  const canExportPdf =
+    Boolean(activeFile) &&
+    !isPdf &&
+    typeof activeFile?.content === 'string'
   const canAgent =
     Boolean(activeFile) &&
     !isPdf &&
@@ -232,19 +241,39 @@ function App() {
     try {
       if (!activeFile) return
       if (typeof activeFile.content !== 'string') return
-      if (!canExportPdf) return
-
       const themeAttr = document.documentElement.getAttribute('data-theme')
       const themeMode: 'light' | 'dark' = themeAttr === 'light' ? 'light' : 'dark'
 
+      const full = activeFile.content
+      const totalLines = full.split('\n').length
+      let sourceForPdf = full
+      let truncatedForPdf = false
+      if (totalLines > MAX_PDF_EXPORT_LINES) {
+        const go = await confirmTruncatedPdfExport({
+          totalLines,
+          maxLines: MAX_PDF_EXPORT_LINES,
+        })
+        if (!go) {
+          await notify({ title: '导出 PDF', message: '已取消。', kind: 'info' })
+          return
+        }
+        sourceForPdf = full.split('\n').slice(0, MAX_PDF_EXPORT_LINES).join('\n')
+        truncatedForPdf = true
+      }
+
       let html = ''
       if (activeFile.language === 'markdown') {
-        const raw = marked.parse(activeFile.content) as string
+        const raw = marked.parse(sourceForPdf) as string
         html = DOMPurify.sanitize(raw)
       } else if (activeFile.language === 'html') {
-        html = DOMPurify.sanitize(activeFile.content)
+        html = DOMPurify.sanitize(sourceForPdf)
       } else {
-        return
+        html = buildPdfSourceHtml({
+          code: sourceForPdf,
+          language: activeFile.language,
+          theme: themeMode,
+          fileLineCount: totalLines,
+        })
       }
 
       const pdfBytes = await exportHtmlToPdfBytes({
@@ -253,7 +282,7 @@ function App() {
         theme: themeMode,
       })
 
-      const baseName = activeFile.name.replace(/\.(md|markdown|html|htm)$/i, '')
+      const baseName = activeFile.name.replace(/\.[^.\\/]+$/u, '')
       const path = await pickSavePdfPath(`${baseName}.pdf`)
       if (!path) {
         await notify({ title: '导出 PDF', message: '已取消。', kind: 'info' })
@@ -262,7 +291,12 @@ function App() {
 
       const ok = await saveBinaryFile(path, pdfBytes)
       if (ok) {
-        await notify({ title: '导出 PDF 成功', message: `已保存到：\n${path}`, kind: 'info' })
+        const tail = truncatedForPdf ? `\n\n${PDF_TRUNC_TAIL_NOTICE}` : ''
+        await notify({
+          title: '导出 PDF 成功',
+          message: `已保存到：\n${path}${tail}`,
+          kind: 'info',
+        })
       } else {
         await notify({ title: '导出 PDF 失败', message: '写入文件失败，请检查权限或路径。', kind: 'error' })
       }

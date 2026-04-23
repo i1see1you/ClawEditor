@@ -4,6 +4,23 @@ import { jsPDF } from 'jspdf'
 const A4_WIDTH_MM = 210
 const A4_HEIGHT_MM = 297
 
+/** Stay below common WebKit/Chromium canvas pixel caps (~2^28) to avoid blank captures. */
+const MAX_HTML2CANVAS_PIXELS = 160_000_000
+
+function desiredHtml2CanvasScale(): number {
+  return Math.max(2, window.devicePixelRatio || 2)
+}
+
+function computeSafeHtml2CanvasScale(width: number, height: number): number {
+  const w = Math.max(1, Math.ceil(width))
+  const h = Math.max(1, Math.ceil(height))
+  let scale = desiredHtml2CanvasScale()
+  if (w * h * scale * scale <= MAX_HTML2CANVAS_PIXELS) return scale
+  const maxScale = Math.sqrt(MAX_HTML2CANVAS_PIXELS / (w * h))
+  // Keep at least 1x so exports stay legible; huge docs may still be heavy but render.
+  return Math.max(1, Math.min(scale, Math.floor(maxScale * 100) / 100))
+}
+
 export async function exportHtmlToPdfBytes(options: {
   html: string
   title?: string
@@ -20,8 +37,16 @@ export async function exportHtmlToPdfBytes(options: {
   container.style.color = theme === 'dark' ? '#cccccc' : '#333333'
   container.style.padding = '24px'
   container.style.boxSizing = 'border-box'
+  container.style.overflow = 'hidden'
   container.style.fontFamily =
     '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif'
+
+  const exportClamp = document.createElement('style')
+  exportClamp.textContent = `
+    /* Snapshot-only: avoid single-line JSON blowing scrollWidth past canvas limits */
+    pre, code { white-space: pre-wrap !important; word-break: break-word; overflow-wrap: anywhere; max-width: 100%; }
+  `
+  container.appendChild(exportClamp)
 
   if (title) {
     const h = document.createElement('h1')
@@ -38,8 +63,16 @@ export async function exportHtmlToPdfBytes(options: {
   document.body.appendChild(container)
 
   try {
+    await new Promise<void>((r) => requestAnimationFrame(() => r()))
+    await new Promise<void>((r) => requestAnimationFrame(() => r()))
+    void container.offsetHeight
+
+    const w = Math.max(container.scrollWidth, container.offsetWidth)
+    const h = Math.max(container.scrollHeight, container.offsetHeight)
+    const scale = computeSafeHtml2CanvasScale(w, h)
+
     const canvas = await html2canvas(container, {
-      scale: Math.max(2, window.devicePixelRatio || 2),
+      scale,
       backgroundColor: theme === 'dark' ? '#1e1e1e' : '#ffffff',
       useCORS: true,
     })
