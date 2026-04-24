@@ -746,7 +746,11 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           try {
             const { version, intent } = await parseEditIntentFallback({
               freeform: localResult.rest,
-              ...contextForSend,
+              file: contextForSend.file,
+              // Privacy: do not send full document text or selection to OpenClaw for /edit fallback.
+              text: '',
+              cursorPos: contextForSend.cursorPos,
+              selection: null,
             })
             pushSystem(formatIntentForLog(version, intent))
             const r = applyParsedIntent(fileText, sel, version, intent)
