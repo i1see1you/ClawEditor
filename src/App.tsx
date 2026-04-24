@@ -22,12 +22,11 @@ import {
   saveFile,
   getFileDiskBaseline,
 } from './utils/fileOps'
-import { exportHtmlToPdfBytes } from './utils/exportPdf'
-import { buildPdfSourceHtml, MAX_PDF_SYNTAX_HIGHLIGHT_LINES } from './utils/pdfHighlight'
+import { exportHtmlToPdfBytes, exportTextToPdfBytes } from './utils/exportPdf'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 
-const MAX_PDF_EXPORT_LINES = MAX_PDF_SYNTAX_HIGHLIGHT_LINES
+const MAX_PDF_EXPORT_LINES = 10_000
 /** Narrow no-break space between digits (same as product copy). */
 const PDF_TRUNC_TAIL_NOTICE = '本 PDF 仅包含原文前 10\u202F000 行。'
 
@@ -268,12 +267,32 @@ function App() {
       } else if (activeFile.language === 'html') {
         html = DOMPurify.sanitize(sourceForPdf)
       } else {
-        html = buildPdfSourceHtml({
-          code: sourceForPdf,
-          language: activeFile.language,
+        // Code-like files export as real text (searchable + crisp).
+        const pdfBytes = await exportTextToPdfBytes({
+          text: sourceForPdf,
+          title: activeFile.name,
           theme: themeMode,
-          fileLineCount: totalLines,
         })
+
+        const baseName = activeFile.name.replace(/\.[^.\\/]+$/u, '')
+        const path = await pickSavePdfPath(`${baseName}.pdf`)
+        if (!path) {
+          await notify({ title: '导出 PDF', message: '已取消。', kind: 'info' })
+          return
+        }
+
+        const ok = await saveBinaryFile(path, pdfBytes)
+        if (ok) {
+          const tail = truncatedForPdf ? `\n\n${PDF_TRUNC_TAIL_NOTICE}` : ''
+          await notify({
+            title: '导出 PDF 成功',
+            message: `已保存到：\n${path}${tail}`,
+            kind: 'info',
+          })
+        } else {
+          await notify({ title: '导出 PDF 失败', message: '写入文件失败，请检查权限或路径。', kind: 'error' })
+        }
+        return
       }
 
       const pdfBytes = await exportHtmlToPdfBytes({
