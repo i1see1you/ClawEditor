@@ -21,6 +21,7 @@ import { stat } from '@tauri-apps/plugin-fs'
 import { getClaweditorConfigForSkill, validateClaweditorConfig } from '../skills/claweditorConfig'
 import { runSkillCompletions } from '../skills/completionEngine'
 import { getSkillDef, getSkillHelpText } from '../skills/skillRegistry'
+import { getCommandHintText } from '../commands/registry'
 
 interface AgentPanelProps {
   activeFile: FileTab | undefined
@@ -147,7 +148,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     if (!wsUrl.trim()) return '填写 Gateway 地址后连接 · 输入 / 查看命令'
     if (connection !== 'open')
       return '连接 Gateway 后发送 · 输入 / 查看命令'
-    return '输入 / 查看命令 · 自然语言或 /aiedit、/aiimport、/edit …'
+    return getCommandHintText()
   }, [canUseAgent, wsUrl, connection, inputValue])
 
   const proposalDiff = useMemo(() => {
@@ -185,16 +186,8 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   }, [pendingProposal, proposalFileText])
 
   const classifyAction = (raw: string): { action: OpenClawAction; instruction: string } => {
+    // Single chat action; /edit and /<skill> are handled separately.
     const t = raw.trim()
-    let m = t.match(/^\/(explain|format)\s*(.*)$/i)
-    if (m) {
-      const a = m[1].toLowerCase() as OpenClawAction
-      const rest = (m[2] ?? '').trim()
-      return { action: a, instruction: rest || t }
-    }
-
-    if (/^(格式化|format)\b/i.test(t)) return { action: 'format', instruction: t }
-    if (/^(解释|explain|说明|讲解)\b/i.test(t)) return { action: 'explain', instruction: t }
     return { action: 'explain', instruction: t }
   }
 

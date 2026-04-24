@@ -1,7 +1,7 @@
 /**
  * Slash-command palette data (/aiedit, /aiimport, /edit …) for AgentChatInput.
  */
-import { getAllSkillMetas } from '../skills/skillRegistry'
+import { getAllCommands } from '../commands/registry'
 
 export type PaletteItem = {
   id: string
@@ -13,18 +13,12 @@ export type PaletteItem = {
 }
 
 export const ROOT_COMMANDS: PaletteItem[] = [
-  ...getAllSkillMetas().map((s) => ({
-    id: s.id,
-    label: `/${s.id}`,
-    description: s.description || `来自 skills/${s.id}/SKILL.md`,
-    insertFromSlash: `/${s.id} `,
+  ...getAllCommands().map((c) => ({
+    id: c.id,
+    label: c.label,
+    description: c.description,
+    insertFromSlash: c.insertFromSlash,
   })),
-  {
-    id: 'edit',
-    label: '/edit',
-    description: '本地子命令；无法解析时可走 Gateway',
-    insertFromSlash: '/edit ',
-  },
 ]
 
 export const EDIT_SUBCOMMANDS: PaletteItem[] = [
@@ -109,7 +103,7 @@ function isAfterRemoteCommandBody(lineFromSlash: string): boolean {
   const m = lineFromSlash.match(/^\/([a-zA-Z0-9_-]+)\s+\S/)
   if (!m) return false
   const id = (m[1] ?? '').toLowerCase()
-  return Boolean(getAllSkillMetas().some((s) => s.id === id))
+  return Boolean(getAllCommands().some((c) => c.kind === 'skill' && c.id === id))
 }
 
 export function getPaletteState(value: string, cursorPos: number): PaletteState {

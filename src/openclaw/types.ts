@@ -1,4 +1,4 @@
-export type OpenClawAction = 'explain' | 'format' | 'edit' | 'skill'
+export type OpenClawAction = 'explain' | 'edit' | 'skill'
 
 export interface OpenClawProposalPayload {
   kind: 'replace_whole_document'
