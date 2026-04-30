@@ -10,7 +10,7 @@ kind: local_intent_four_op
 说明：
 - 由 OpenClaw 按 skills/aiedit/SKILL.md 协议生成本地 JSON 意图（四种本地 op）。
 - 无选区：附带全文，确认时为全文 diff。
-- 有选区：发送选区与全文，确认时可仅 diff 选区。
+- 有选区：仅发送选区（作用域文本），确认时可仅 diff 选区。
 - 需已连接 OpenClaw Gateway。
 
 示例：
@@ -19,7 +19,7 @@ kind: local_intent_four_op
 
 # ClawEditor `/aiedit`（本地编辑意图）
 
-ClawEditor 会把「当前缓冲区的全文或选区 + 用户指令」发给 OpenClaw Gateway。**不要**直接写入磁盘；**不要**把磁盘上的文件当作真实来源（缓冲区可能有未保存修改）。
+ClawEditor 会把「当前作用域文本（无选区则为全文；有选区则为选区文本） + 用户指令」发给 OpenClaw Gateway。**不要**直接写入磁盘；**不要**把磁盘上的文件当作真实来源（缓冲区可能有未保存修改）。
 
 ## 你必须输出的形式
 
@@ -39,7 +39,7 @@ ClawEditor 会把「当前缓冲区的全文或选区 + 用户指令」发给 Op
 | `insert` | 在 UTF-16 偏移 `at` 处插入 `text` | `at`, `text` |
 
 - 偏移均为 **UTF-16 代码单元**，与请求里给出的选区/全文的约定一致。
-- `replace_selection` 的区间必须落在你收到的全文长度范围内；若用户有选区，通常应使用请求中的 `from`/`to` 与选区文本一致。
+- `replace_selection` 的区间必须与请求里给出的 `from`/`to` 一致（它们指向原始全文中的 UTF-16 偏移）；不要臆测选区外内容。
 
 ## 禁止使用 Gateway 写盘工具
 

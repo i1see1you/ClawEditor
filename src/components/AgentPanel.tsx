@@ -404,6 +404,18 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     }
   }, [activeFile, fileText, selection])
 
+  const contextForSkillSend = useMemo(() => {
+    if (!contextForSend) return null
+    if (contextForSend.selection?.text) {
+      return {
+        ...contextForSend,
+        // Skill input is scope text: when there's a selection, only send selection text.
+        text: contextForSend.selection.text,
+      }
+    }
+    return contextForSend
+  }, [contextForSend])
+
   const handleApplyIntentResult = useCallback(
     (result: ApplyIntentResult, requestId?: string) => {
       switch (result.kind) {
@@ -612,7 +624,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               action: 'skill',
               skillId,
               instruction,
-              ...contextForSend!,
+              ...(contextForSkillSend ?? contextForSend)!,
             })
             if (!ok) {
               pushSystem(
@@ -802,6 +814,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     [
       canUseAgent,
       contextForSend,
+      contextForSkillSend,
       selection,
       fileText,
       wsUrl,

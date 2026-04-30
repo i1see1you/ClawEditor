@@ -724,29 +724,28 @@ export class OpenClawWsChannel {
       )
     } else if (params.selection && params.selection.from !== params.selection.to) {
       const sel = params.selection
+      const selStartsWithNewline = sel.text.startsWith('\n')
+      const selEndsWithNewline = sel.text.endsWith('\n')
       lines.push(
         '',
-        '--- selection (UTF-16 offsets; replace this range in the full document below) ---',
+        '--- selection (UTF-16 offsets in the ORIGINAL full document; replace this range) ---',
         `from: ${sel.from}`,
         `to: ${sel.to}`,
         '',
         sel.text,
         '--- end selection ---',
         '',
-        'The full document below is the only source of truth (not disk).',
+        'IMPORTANT: you ONLY received the selection text above (scope text).',
+        'Do NOT assume you have seen the full document; do NOT claim awareness of content outside the selection.',
         '',
-        '--- full document (editor buffer) ---',
-        params.text,
-        '--- end full document ---',
+        'BOUNDARY RULES (must follow exactly):',
+        `- The selection text ${selStartsWithNewline ? 'STARTS' : 'does NOT start'} with a newline (\\n). Your replacement text must ${selStartsWithNewline ? '' : 'NOT '}start with a newline.`,
+        `- The selection text ${selEndsWithNewline ? 'ENDS' : 'does NOT end'} with a newline (\\n). Your replacement text must ${selEndsWithNewline ? '' : 'NOT '}end with a newline.`,
+        '- Do not add or remove extra leading/trailing newlines beyond the two rules above.',
+        '- Never cause text outside the selection to join onto the same line (i.e. do not "eat" the newline between surrounding lines).',
+        '- If you are uncertain about boundary newlines, prefer preserving them rather than removing them.',
         '',
         'Apply the instruction to this selection; output JSON per the skill (JSON only).',
-      )
-      const ctx = getContextLinesAroundCursor(params.text, params.cursorPos, 8, 8)
-      lines.push(
-        '',
-        `--- context (cursor ≈ line ${ctx.cursorLine1} / ${ctx.totalLines}; lines ${ctx.startLine1}-${ctx.endLine1}) ---`,
-        ctx.snippet,
-        '--- end context ---'
       )
     }
 
