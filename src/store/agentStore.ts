@@ -128,6 +128,13 @@ interface AgentState {
     cursorPos: number
     selection: { text: string; from: number; to: number } | null
   }) => Promise<{ version: number; intent: unknown }>
+  parseFindIntentFallback: (params: {
+    freeform: string
+    file: { name: string; language: string; path: string }
+    text: string
+    cursorPos: number
+    selection: { text: string; from: number; to: number } | null
+  }) => Promise<{ version: number; intent: unknown }>
   clearProposal: () => void
   setPendingProposal: (p: PendingProposal | null) => void
   appendStreaming: (delta: string) => void
@@ -477,6 +484,19 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set({ suppressAssistantFinalIntentJson: true })
     try {
       return await c.parseEditIntentViaGateway(params)
+    } finally {
+      set({ suppressAssistantFinalIntentJson: false })
+    }
+  },
+
+  parseFindIntentFallback: async (params) => {
+    const c = wsChannel
+    if (!c) {
+      throw new Error('未连接 OpenClaw Gateway')
+    }
+    set({ suppressAssistantFinalIntentJson: true })
+    try {
+      return await c.parseFindIntentViaGateway(params)
     } finally {
       set({ suppressAssistantFinalIntentJson: false })
     }

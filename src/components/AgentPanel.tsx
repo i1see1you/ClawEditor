@@ -11,6 +11,8 @@ import { getEditReplaceParamHint } from './agentCommandPalette'
 import type { OpenClawAction } from '../openclaw/types'
 import { applyParsedIntent, type ApplyIntentResult } from '../openclaw/applyIntent'
 import { gotoLineInEditor } from '../utils/gotoLine'
+import { parseLocalFind } from '../utils/findCommand'
+import { applyFindInEditor } from '../utils/applyFindInEditor'
 import { parseSimpleEditInstruction } from '../utils/simpleCommands'
 import { mergeRange } from '../utils/documentOps'
 import {
@@ -190,6 +192,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   const disconnect = useAgentStore((s) => s.disconnect)
   const send = useAgentStore((s) => s.send)
   const parseEditIntentFallback = useAgentStore((s) => s.parseEditIntentFallback)
+  const parseFindIntentFallback = useAgentStore((s) => s.parseFindIntentFallback)
   const clearProposal = useAgentStore((s) => s.clearProposal)
   const setPendingProposal = useAgentStore((s) => s.setPendingProposal)
   const messages = useAgentStore((s) => s.messages)
@@ -546,6 +549,20 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           }
           break
         }
+        case 'find': {
+          const view = useEditorStore.getState().editorView
+          if (!view) {
+            pushSystem(ansiMsg('\x1b[33m编辑器尚未就绪，无法查找\x1b[0m'))
+            break
+          }
+          const fr = applyFindInEditor(view, result.spec)
+          if (!fr.ok) {
+            pushSystem(ansiMsg(`\x1b[31m${fr.message}\x1b[0m`))
+          } else {
+            pushSystem(fr.summary)
+          }
+          break
+        }
         case 'clarify':
           pushSystem(ansiMsg(`\x1b[33m${result.message}\x1b[0m`))
           break
@@ -579,6 +596,89 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       if (skillMatch) {
         const skillId = (skillMatch[1] ?? '').toLowerCase()
         const rest = (skillMatch[2] ?? '').trim()
+        if (skillId === 'find') {
+          const selScope =
+            sel && sel.from !== sel.to
+              ? { from: sel.from, to: sel.to }
+              : null
+          const localFind = parseLocalFind(trimmed, selScope)
+          if (localFind.kind === 'help') {
+            useAgentStore.setState({ lastError: null })
+            pushSystem(localFind.text)
+            return
+          }
+          if (localFind.kind === 'error') {
+            useAgentStore.setState({ lastError: null })
+            pushSystem(ansiMsg(`\x1b[31m${localFind.message}\x1b[0m`))
+            return
+          }
+          if (localFind.kind === 'find') {
+            useAgentStore.setState({ lastError: null })
+            const view = useEditorStore.getState().editorView
+            if (!view) {
+              pushSystem(ansiMsg('\x1b[33m编辑器尚未就绪，无法查找\x1b[0m'))
+              return
+            }
+            const fr = applyFindInEditor(view, localFind.spec)
+            if (!fr.ok) {
+              pushSystem(ansiMsg(`\x1b[31m${fr.message}\x1b[0m`))
+            } else {
+              pushSystem(fr.summary)
+            }
+            return
+          }
+          if (localFind.kind === 'fallback_gateway') {
+            if (!wsUrl.trim()) {
+              pushSystem(
+                ansiMsg(
+                  '\x1b[31m本地无法解析该 /find。请连接 OpenClaw Gateway，或改用 /find help。\x1b[0m'
+                )
+              )
+              return
+            }
+            if (connection !== 'open') {
+              pushSystem(
+                ansiMsg(
+                  '\x1b[31m本地无法解析该 /find。请先连接 OpenClaw，或改用 /find help。\x1b[0m'
+                )
+              )
+              return
+            }
+            void (async () => {
+              useAgentStore.setState({ lastError: null })
+              pushSystem(
+                ansiMsg(
+                  '\x1b[33m本地判定需 OpenClaw（多词或长文本等），正在解析查找意图…\x1b[0m'
+                )
+              )
+              try {
+                const { version, intent } = await parseFindIntentFallback({
+                  freeform: `/find ${localFind.rest}`,
+                  file: contextForSend.file,
+                  text: '',
+                  cursorPos: contextForSend.cursorPos,
+                  selection: null,
+                })
+                pushSystem(formatIntentForLog(version, intent))
+                const r = applyParsedIntent(fileText, sel, version, intent)
+                if (r.kind === 'edit') {
+                  pushSystem(
+                    ansiMsg(
+                      '\x1b[31m模型返回了编辑类意图，并非查找。请改用 /edit 或重述查找需求。\x1b[0m'
+                    )
+                  )
+                } else {
+                  handleApplyIntentResult(r)
+                }
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e)
+                pushSystem(ansiMsg(`\x1b[31m${msg}\x1b[0m`))
+              }
+            })()
+            return
+          }
+          return
+        }
         const def = getSkillDef(skillId)
         if (def) {
           const wantsExplicitHelp =
@@ -998,6 +1098,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       send,
       setPendingProposal,
       parseEditIntentFallback,
+      parseFindIntentFallback,
       handleApplyIntentResult,
       pushSystem,
     ]

@@ -11,6 +11,7 @@ import { Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { undoDepth, redoDepth } from '@codemirror/commands'
 import { highlightSelectionMatches, search, searchKeymap } from '@codemirror/search'
+import { searchMatchStatusExtensions } from '../editor/searchMatchStatus'
 import { useFileStore } from '../store/fileStore'
 import { useEditorStore } from '../store/editorStore'
 import type { FileTab } from '../types'
@@ -58,6 +59,7 @@ export function EditorPanel({ file, showPreview = false }: EditorPanelProps) {
       search(),
       highlightSelectionMatches(),
       keymap.of(searchKeymap),
+      ...searchMatchStatusExtensions(),
     ],
     []
   )

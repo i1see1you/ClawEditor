@@ -584,6 +584,44 @@ export class OpenClawWsChannel {
     return lines.join('\n')
   }
 
+  private buildFindIntentParseMessage(params: {
+    freeform: string
+    file: { name: string; language: string; path: string }
+    text: string
+    cursorPos: number
+    selection: { text: string; from: number; to: number } | null
+  }): string {
+    const lines = [
+      '[ClawEditor /find → OpenClaw 意图解析]',
+      '你只输出一个 JSON 对象，不要 markdown 代码块、不要解释、不要多余文字。',
+      '顶层示例（intent 内必须换成真实内容，禁止输出 TODO、PLACEHOLDER、示例、… 等占位）：{"version":1,"intent":{"op":"find_literal","scope":"auto","needle":"用户要搜的真实字面","caseSensitive":true}}',
+      '仅查找、不修改文档。intent.op 可为：find_literal、find_regex、clarify、noop。',
+      '可有 scope:"auto"|"file"|"selection"（auto：有选区则仅在选区内匹配）。',
+      'find_literal：needle 为要在正文里搜的连续字面（非空）；可选 caseSensitive（默认 true）。',
+      '若用户要「一类事物」且无法穷举：用 find_regex，pattern 给出「合理子集」即可，例如常见项用括号竖线枚举：(比亚迪|吉利|长城|长安)；不必追求全集。',
+      '若信息不足、无法给出可靠 needle 或 pattern：输出 {"op":"clarify","message":"…"} 用一句话说明缺什么。',
+      'find_regex 示例：{"op":"find_regex","pattern":"\\d+","flags":""} 匹配数字；pattern 为「JSON 解析后」的 JS 正则源码（\\d 为数字类），勿多写反斜杠。',
+      '不要输出 replace_all、replace_regex 等编辑类 op；查找不得包含 replacement。',
+      '',
+      '用户自然语言查找请求：',
+      params.freeform,
+      '',
+      `file: ${params.file.name} (${params.file.language})`,
+      `path: ${fileNameFromPath(params.file.path)}`,
+    ]
+    if (params.selection?.text) {
+      lines.push('', '--- selection ---', params.selection.text, '--- end selection ---')
+    }
+    const ctx = getContextLinesAroundCursor(params.text, params.cursorPos, 10, 10)
+    lines.push(
+      '',
+      `--- context (cursor ≈ line ${ctx.cursorLine1} / ${ctx.totalLines}; lines ${ctx.startLine1}-${ctx.endLine1}) ---`,
+      ctx.snippet,
+      '--- end context ---'
+    )
+    return lines.join('\n')
+  }
+
   /**
    * Subscribe to a fresh session and send one user message (chat.send with sessions.send fallback).
    */
@@ -783,6 +821,54 @@ export class OpenClawWsChannel {
     })
 
     const message = this.buildEditIntentParseMessage(params)
+
+    try {
+      await this.deliverGatewayMessage(message)
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e))
+      this.rejectIntentParse(err)
+      await promise
+    }
+
+    const raw = await promise
+    try {
+      const parsed = extractJsonObject(raw)
+      return parseIntentEnvelope(parsed)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      throw new Error(`无法从 OpenClaw 回复解析意图 JSON：${msg}`)
+    }
+  }
+
+  /** When local `/find` parsing fails: ask the model for EditorIntentV1 JSON (find_* ops), then apply locally. */
+  async parseFindIntentViaGateway(params: {
+    freeform: string
+    file: { name: string; language: string; path: string }
+    text: string
+    cursorPos: number
+    selection: { text: string; from: number; to: number } | null
+  }): Promise<{ version: number; intent: unknown }> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error('WebSocket 未连接')
+    }
+    if (this.intentParseWaiter) {
+      throw new Error('已有意图解析请求进行中，请稍后再试')
+    }
+
+    this.activeFilePath = params.file.path
+    this.turnBuffer = ''
+    this.handlers.clearStreaming?.()
+    this.intentParseAcc = ''
+    this.cancelPendingDiffProposal()
+
+    const promise = new Promise<string>((resolve, reject) => {
+      this.intentParseWaiter = { resolve, reject }
+      this.intentParseTimer = window.setTimeout(() => {
+        this.rejectIntentParse(new Error('OpenClaw 意图解析超时（60 秒）'))
+      }, 60_000)
+    })
+
+    const message = this.buildFindIntentParseMessage(params)
 
     try {
       await this.deliverGatewayMessage(message)

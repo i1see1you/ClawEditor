@@ -21,6 +21,45 @@ export const ROOT_COMMANDS: PaletteItem[] = [
   })),
 ]
 
+export const FIND_SUBCOMMANDS: PaletteItem[] = [
+  {
+    id: 'find-help',
+    label: 'help',
+    description: '列出 /find 用法',
+    insertFromSlash: '/find help',
+  },
+  {
+    id: 'find-literal',
+    label: '字面 …',
+    description: '默认区分大小写',
+    insertFromSlash: '/find ',
+  },
+  {
+    id: 'find-i',
+    label: '-i …',
+    description: '忽略大小写',
+    insertFromSlash: '/find -i ',
+  },
+  {
+    id: 'find-regex',
+    label: '-r …',
+    description: '正则查找',
+    insertFromSlash: '/find -r ',
+  },
+  {
+    id: 'find-slash',
+    label: '/pattern/flags',
+    description: '斜杠正则（例 /foo/i）',
+    insertFromSlash: '/find /',
+  },
+  {
+    id: 'find-freeform',
+    label: '（自然语言）',
+    description: '多词且无选项时走 Gateway',
+    insertFromSlash: '/find ',
+  },
+]
+
 export const EDIT_SUBCOMMANDS: PaletteItem[] = [
   {
     id: 'edit-help',
@@ -129,6 +168,10 @@ export function getPaletteState(value: string, cursorPos: number): PaletteState 
 
   if (head === 'edit' && tokens.length >= 1) {
     return { open: true, items: filterItems(EDIT_SUBCOMMANDS, tail) }
+  }
+
+  if (head === 'find' && tokens.length >= 1) {
+    return { open: true, items: filterItems(FIND_SUBCOMMANDS, tail) }
   }
 
   const rootFiltered = filterItems(

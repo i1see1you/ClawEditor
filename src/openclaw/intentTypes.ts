@@ -23,6 +23,9 @@ export type IntentOp =
   /** Same as insert_at; skill alias using `at`. */
   | 'insert'
   | 'goto_line'
+  /** Set editor search query + panel; scope limits matches when selection. */
+  | 'find_literal'
+  | 'find_regex'
   | 'clarify'
   | 'noop'
 
@@ -47,4 +50,6 @@ export interface EditorIntentV1 {
   offset?: number
   /** Text to insert (insert_at / append). */
   text?: string
+  /** find_literal: default true when omitted. */
+  caseSensitive?: boolean
 }

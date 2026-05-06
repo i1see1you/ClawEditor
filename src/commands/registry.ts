@@ -1,6 +1,6 @@
 import { getAllSkillMetas, type SkillMeta } from '../skills/skillRegistry'
 
-export type BuiltinCommandId = 'edit'
+export type BuiltinCommandId = 'edit' | 'find'
 
 export type Command =
   | {
@@ -27,6 +27,13 @@ const BUILTINS: Command[] = [
     description: '本地子命令；无法解析时可走 Gateway',
     insertFromSlash: '/edit ',
   },
+  {
+    kind: 'builtin',
+    id: 'find',
+    label: '/find',
+    description: '查找（字面/正则）；多词可走 Gateway',
+    insertFromSlash: '/find ',
+  },
 ]
 
 export function getAllCommands(): Command[] {
@@ -46,7 +53,7 @@ export function getCommandHintText(maxSkills = 2): string {
   const skills = getAllSkillMetas()
     .slice(0, Math.max(0, maxSkills))
     .map((s) => `/${s.id}`)
-  const tail = skills.length ? `${skills.join('、')}、/edit …` : '/edit …'
+  const tail = skills.length ? `${skills.join('、')}、/edit …、/find …` : '/edit …、/find …'
   return `输入 / 查看命令 · 自然语言或 ${tail}`
 }
 

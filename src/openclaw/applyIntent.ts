@@ -1,3 +1,4 @@
+import type { FindQuerySpec } from '../utils/applyFindInEditor'
 import {
   applyReplaceAll,
   applyReplaceRegex,
@@ -13,6 +14,7 @@ import { SUPPORTED_INTENT_PROTOCOL_VERSION, type EditorIntentV1, type IntentScop
 export type ApplyIntentResult =
   | { kind: 'edit'; newText: string; summary: string; title: string }
   | { kind: 'goto'; line: number }
+  | { kind: 'find'; spec: FindQuerySpec }
   | { kind: 'clarify'; message: string }
   | { kind: 'noop' }
   | { kind: 'error'; message: string }
@@ -20,6 +22,18 @@ export type ApplyIntentResult =
 type ResolvedScope =
   | { ok: true; range: 'file' | 'selection' }
   | { ok: false; message: string }
+
+/**
+ * Gateway JSON often over-escapes regex (e.g. pattern parses to `\\d+` instead of `\d+`),
+ * which matches a literal backslash + "d" and finds nothing for digits.
+ */
+function normalizeFindRegexPattern(pattern: string): string {
+  let p = pattern
+  while (/^\\{2,}(?=[dDwWsSbnrtfvxu])/.test(p)) {
+    p = p.replace(/^\\{2,}(?=[dDwWsSbnrtfvxu])/, '\\')
+  }
+  return p
+}
 
 function resolveScope(scope: IntentScope | undefined, sel: DocSelectionNullable): ResolvedScope {
   const s = scope ?? 'auto'
@@ -210,6 +224,65 @@ export function applyParsedIntent(
         return { kind: 'error', message: 'goto_line 需要正整数 line。' }
       }
       return { kind: 'goto', line }
+    }
+    case 'find_literal': {
+      const needle = intent.needle
+      if (typeof needle !== 'string' || !needle) {
+        return { kind: 'error', message: 'find_literal 需要非空 needle。' }
+      }
+      const needleTrim = needle.trim()
+      const bannedNeedle = /^(TODO|PLACEHOLDER|示例|example|test)$/i
+      if (bannedNeedle.test(needleTrim)) {
+        return {
+          kind: 'error',
+          message:
+            'find_literal 的 needle 不能是占位词；请让模型输出真实字面，或对开放类实体改用 find_regex（子集枚举）或 clarify。',
+        }
+      }
+      const caseSensitive = intent.caseSensitive !== false
+      const restrictTo =
+        resolved.range === 'selection' && selection
+          ? { from: selection.from, to: selection.to }
+          : undefined
+      const spec: FindQuerySpec = {
+        search: needle,
+        regexp: false,
+        literal: true,
+        caseSensitive,
+        restrictTo,
+      }
+      return { kind: 'find', spec }
+    }
+    case 'find_regex': {
+      const patternRaw = intent.pattern
+      if (typeof patternRaw !== 'string' || !patternRaw.trim()) {
+        return { kind: 'error', message: 'find_regex 需要非空 pattern。' }
+      }
+      if (/^(TODO|PLACEHOLDER)$/i.test(patternRaw.trim())) {
+        return {
+          kind: 'error',
+          message:
+            'find_regex 的 pattern 不能是占位词；请输出真实正则（如子集枚举）或 clarify。',
+        }
+      }
+      if (intent.flags !== undefined && typeof intent.flags !== 'string') {
+        return { kind: 'error', message: 'find_regex 的 flags 必须是字符串。' }
+      }
+      const pattern = normalizeFindRegexPattern(patternRaw.trim())
+      const flags = intent.flags ?? ''
+      const ignoreCase = flags.includes('i')
+      const restrictTo =
+        resolved.range === 'selection' && selection
+          ? { from: selection.from, to: selection.to }
+          : undefined
+      const spec: FindQuerySpec = {
+        search: pattern,
+        regexp: true,
+        literal: false,
+        caseSensitive: !ignoreCase,
+        restrictTo,
+      }
+      return { kind: 'find', spec }
     }
     case 'clarify': {
       const msg = typeof intent.message === 'string' ? intent.message : '需要更多信息。'

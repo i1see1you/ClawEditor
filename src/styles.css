@@ -469,6 +469,24 @@ body {
   height: 100% !important;
 }
 
+/* Find: viewport match highlights (stronger than CodeMirror defaults) */
+.editor-panel .cm-searchMatch {
+  background-color: rgba(255, 210, 64, 0.42);
+  outline: 1px solid rgba(255, 160, 0, 0.35);
+}
+.editor-panel .cm-searchMatch.cm-searchMatch-selected {
+  background-color: rgba(255, 140, 40, 0.55);
+  outline: 1px solid rgba(220, 90, 0, 0.55);
+}
+[data-theme="light"] .editor-panel .cm-searchMatch {
+  background-color: rgba(255, 200, 0, 0.38);
+  outline: 1px solid rgba(200, 130, 0, 0.4);
+}
+[data-theme="light"] .editor-panel .cm-searchMatch.cm-searchMatch-selected {
+  background-color: rgba(255, 130, 50, 0.42);
+  outline: 1px solid rgba(180, 80, 0, 0.45);
+}
+
 /* Welcome Screen */
 .welcome-screen {
   display: flex;
@@ -568,6 +586,14 @@ body {
 
 .status-right {
   margin-left: auto;
+}
+
+.status-find-line {
+  font-weight: 600;
+  max-width: 42vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* OpenClaw Agent panel */
