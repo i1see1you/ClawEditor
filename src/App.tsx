@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef, type MouseEvent as ReactMouseEvent } from 'react'
 import { readTextFile } from '@tauri-apps/plugin-fs'
 import { useFileStore } from './store/fileStore'
 import { TabBar } from './components/TabBar'
@@ -30,19 +30,62 @@ const MAX_PDF_EXPORT_LINES = 10_000
 /** Narrow no-break space between digits (same as product copy). */
 const PDF_TRUNC_TAIL_NOTICE = '本 PDF 仅包含原文前 10\u202F000 行。'
 
+const AGENT_PANEL_MIN_HEIGHT = 140
+function maxAgentPanelHeight(): number {
+  return Math.max(AGENT_PANEL_MIN_HEIGHT, Math.floor(window.innerHeight * 0.92))
+}
+
 function App() {
   const { files, activeFileId, setActiveFileId } = useFileStore()
   const [theme, setTheme] = useState<'light' | 'dark'>('dark')
   const [showPreview, setShowPreview] = useState(false)
   const [showDiff, setShowDiff] = useState(false)
   const [showAgent, setShowAgent] = useState(false)
-  const agentPanelHeight = 260
+  const [agentPanelHeight, setAgentPanelHeight] = useState(260)
+  const agentDragRef = useRef<{ startY: number; startHeight: number } | null>(null)
   /** When disk changed while buffer has unsaved edits (focus-time check). */
   const [externalConflictFileId, setExternalConflictFileId] = useState<string | null>(null)
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
   }, [theme])
+
+  useEffect(() => {
+    const onWinResize = () => {
+      setAgentPanelHeight((h) =>
+        Math.min(maxAgentPanelHeight(), Math.max(AGENT_PANEL_MIN_HEIGHT, h))
+      )
+    }
+    window.addEventListener('resize', onWinResize)
+    return () => window.removeEventListener('resize', onWinResize)
+  }, [])
+
+  const handleAgentResizeStart = useCallback((e: ReactMouseEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    agentDragRef.current = { startY: e.clientY, startHeight: agentPanelHeight }
+    document.body.style.cursor = 'row-resize'
+    document.body.style.userSelect = 'none'
+
+    const onMove = (ev: MouseEvent) => {
+      const d = agentDragRef.current
+      if (!d) return
+      const delta = d.startY - ev.clientY
+      const next = Math.min(
+        maxAgentPanelHeight(),
+        Math.max(AGENT_PANEL_MIN_HEIGHT, d.startHeight + delta)
+      )
+      setAgentPanelHeight(next)
+    }
+    const onUp = () => {
+      agentDragRef.current = null
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [agentPanelHeight])
 
   const handleOpenFile = async () => {
     const file = await openFile()
@@ -388,7 +431,16 @@ function App() {
           )}
         </div>
         {showAgent && canAgent ? (
-          <AgentPanel activeFile={activeFile} height={agentPanelHeight} />
+          <>
+            <div
+              className="agent-dock-resize-handle"
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="调整 OpenClaw 面板高度"
+              onMouseDown={handleAgentResizeStart}
+            />
+            <AgentPanel activeFile={activeFile} height={agentPanelHeight} />
+          </>
         ) : null}
       </div>
       <StatusBar

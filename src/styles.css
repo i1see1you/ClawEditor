@@ -138,6 +138,22 @@ body {
   overflow: hidden;
 }
 
+.agent-dock-resize-handle {
+  flex-shrink: 0;
+  height: 5px;
+  margin: 0;
+  border: none;
+  padding: 0;
+  background: var(--border-color);
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.agent-dock-resize-handle:hover {
+  background: var(--accent);
+  opacity: 0.85;
+}
+
 /* Editor Area */
 .editor-area {
   flex: 1;

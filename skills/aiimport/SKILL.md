@@ -22,6 +22,7 @@ kind: local_intent_four_op
 ```claweditor
 {
   "version": 1,
+  "requiresScopeText": false,
   "instructionWrapper": {
     "prefix": "请将下面内容导入到当前缓冲区。\n\n【格式处理 — OpenClaw（B 方案：按路径读取）】\n- 若你看到 `--- import source (file: ...) ---` 块，其中包含 `path: ...`，这表示 ClawEditor 只提供了 **本机文件路径**；你必须在 Gateway 侧读取该文件并抽取人类可见正文。\n- 对 `.pdf` / `.doc` / `.docx` / `.rtf`：必须用确定性的解析器/工具抽取可见文字（不要把 PDF/Word/RTF 源码当正文导入）。\n- 对扫描版 PDF：若几乎无文本层，需提示用户（或走 OCR 能力）；禁止编造正文。\n- 安全约束：只读取用户明确提供的 `path`，不得扩展为目录扫描或读取其它路径。\n\n【插入位置】\n默认一律在文档末尾追加（JSON op `append`），不要插入到光标处或替换选区，除非「用户在斜杠命令后写的自然语言」里明确要求光标处插入、替换当前选区、或整篇替换。若用户未写明位置，只输出 `append`。"
   },

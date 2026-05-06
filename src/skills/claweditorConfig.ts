@@ -50,6 +50,12 @@ export type ArgsSpec = Record<
 
 type ClawEditorConfig = {
   version: 1
+  /**
+   * Whether this skill needs editor scope text (selection or full buffer).
+   * - true (default): send scope text (may be truncated by caller policies)
+   * - false: caller may send empty text to avoid wasting context budget
+   */
+  requiresScopeText?: boolean
   args?: ArgsSpec
   completions?: CompletionRule[]
   instructionWrapper?: {
@@ -88,6 +94,12 @@ export function validateClaweditorConfig(cfg: ClawEditorConfig): {
   const warnings: string[] = []
   const errors: string[] = []
   if (cfg.version !== 1) errors.push(`version 必须为 1（当前为 ${String(cfg.version)}）`)
+  if (
+    cfg.requiresScopeText !== undefined &&
+    typeof cfg.requiresScopeText !== 'boolean'
+  ) {
+    errors.push('requiresScopeText 必须为 boolean（true/false）')
+  }
   if (cfg.completions) {
     const seen = new Set<string>()
     for (const [i, r] of cfg.completions.entries()) {

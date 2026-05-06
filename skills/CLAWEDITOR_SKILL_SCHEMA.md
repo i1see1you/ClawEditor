@@ -5,10 +5,13 @@
 ### 顶层字段
 
 - **`version`**: `1`（必填）
+- **`requiresScopeText`**: `true|false`（可选，缺省为 `true`）
 - **`args`**: 参数检测与缺参判定（可选）
 - **`completions`**: 补全规则列表（可选）
 - **`instructionWrapper`**: 最终 instruction 外层包装（可选）
 - **`/aiimport`（按路径读取）**：ClawEditor 在选择文件后向 instruction 注入 `path: ...`；Gateway 需读取该路径并解析（PDF/Word/RTF 抽取可见文字）后再生成意图 JSON（见 `skills/aiimport/SKILL.md`）。
+
+当 `requiresScopeText` 为 `false` 时，客户端可以不发送编辑器正文（`text` 可能为空字符串），以节省上下文预算。此时 skill 应主要依赖命令行参数、补全注入块（如导入的 `path` / 剪贴板内容）或其它显式载荷完成任务。
 
 ### `args`
 

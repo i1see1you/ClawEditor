@@ -1,5 +1,6 @@
 import { useEffect, useRef, useMemo, useCallback, useState } from 'react'
 import { computeSelectionDiffSlices } from '../utils/selectionMergeDiff'
+import { selectionProposalFieldsFromReplaceSelectionIntent } from '../utils/pendingProposalSelectionDiff'
 import { useAgentStore } from '../store/agentStore'
 import { useEditorStore } from '../store/editorStore'
 import { useFileStore } from '../store/fileStore'
@@ -30,7 +31,13 @@ interface AgentPanelProps {
 
 type LocalEditParseResult =
   | { kind: 'help'; text: string }
-  | { kind: 'edit'; newText: string; summary: string }
+  | {
+      kind: 'edit'
+      newText: string
+      summary: string
+      /** Present for `/edit replace-selection …` text payloads — proposal UI can diff selection only. */
+      selectionRange?: { from: number; to: number }
+    }
   | { kind: 'error'; message: string }
   | { kind: 'fallback_gateway'; rest: string }
   | { kind: 'noop' }
@@ -47,6 +54,97 @@ function stripAnsi(s: string): string {
 
 function ansiMsg(msg: string): string {
   return stripAnsi(msg)
+}
+
+const MAX_SKILL_SCOPE_LINES = 2000
+
+function countLines(text: string): number {
+  if (!text) return 1
+  let n = 1
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10 /* \n */) n++
+  }
+  return n
+}
+
+function cursorLine1(text: string, cursorPos: number): number {
+  const pos = Math.max(0, Math.min(cursorPos, text.length))
+  let line = 1
+  for (let i = 0; i < pos; i++) {
+    if (text.charCodeAt(i) === 10 /* \n */) line++
+  }
+  return line
+}
+
+function sliceLineWindowAroundCursor(params: {
+  text: string
+  cursorPos: number
+  maxLines: number
+}): {
+  slicedText: string
+  startLine1: number
+  endLine1: number
+  totalLines: number
+  startOffset: number
+  endOffset: number
+} {
+  const { text, cursorPos, maxLines } = params
+  const totalLines = countLines(text)
+  if (totalLines <= maxLines) {
+    return {
+      slicedText: text,
+      startLine1: 1,
+      endLine1: totalLines,
+      totalLines,
+      startOffset: 0,
+      endOffset: text.length,
+    }
+  }
+
+  const cur1 = cursorLine1(text, cursorPos)
+  const before = Math.floor((maxLines - 1) / 2)
+  let startLine1 = Math.max(1, cur1 - before)
+  let endLine1 = Math.min(totalLines, startLine1 + maxLines - 1)
+  // If clamped at end, shift start up to maintain maxLines when possible.
+  startLine1 = Math.max(1, endLine1 - maxLines + 1)
+
+  // Convert line window to UTF-16 offsets without splitting the whole string.
+  let startOffset = 0
+  if (startLine1 > 1) {
+    let line = 1
+    for (let i = 0; i < text.length; i++) {
+      if (text.charCodeAt(i) === 10 /* \n */) {
+        line++
+        if (line === startLine1) {
+          startOffset = i + 1
+          break
+        }
+      }
+    }
+  }
+
+  let endOffset = text.length
+  if (endLine1 < totalLines) {
+    let line = 1
+    for (let i = 0; i < text.length; i++) {
+      if (text.charCodeAt(i) === 10 /* \n */) {
+        if (line === endLine1) {
+          endOffset = i
+          break
+        }
+        line++
+      }
+    }
+  }
+
+  return {
+    slicedText: text.slice(startOffset, endOffset),
+    startLine1,
+    endLine1,
+    totalLines,
+    startOffset,
+    endOffset,
+  }
 }
 
 function formatIntentForLog(version: number, intent: unknown): string {
@@ -377,6 +475,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           kind: 'edit',
           newText,
           summary: `选区整块替换为 ${r.text.length} 字符`,
+          selectionRange: { from: sel.from, to: sel.to },
         }
       }
     }
@@ -620,11 +719,64 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               instruction = r.instruction
             }
 
+            const requiresScopeText =
+              (cfgAll as any)?.requiresScopeText === false ? false : true
+
+            let sendCtx = (requiresScopeText
+              ? (contextForSkillSend ?? contextForSend)
+              : ({ ...(contextForSend as any), text: '' } as any)) as any
+
+            // Guard against overlong context: truncate full-scope skill text when file exceeds line limit.
+            // Keep behavior unchanged when there's a selection (selection scope already handled upstream).
+            const hasSelectionScope = Boolean(
+              sendCtx?.selection && sendCtx.selection.from !== sendCtx.selection.to
+            )
+            if (requiresScopeText && !hasSelectionScope) {
+              const scopeText = String(sendCtx.text ?? '')
+              const total = countLines(scopeText)
+              if (total > MAX_SKILL_SCOPE_LINES) {
+                const sliced = sliceLineWindowAroundCursor({
+                  text: scopeText,
+                  cursorPos: Number(sendCtx.cursorPos ?? 0),
+                  maxLines: MAX_SKILL_SCOPE_LINES,
+                })
+                // Promote truncation window to a real "virtual selection" so UI can show selection diff.
+                // Offsets must refer to the ORIGINAL full document.
+                sendCtx = {
+                  ...sendCtx,
+                  text: sliced.slicedText,
+                  selection: {
+                    from: sliced.startOffset,
+                    to: sliced.endOffset,
+                    text: sliced.slicedText,
+                  },
+                }
+
+                // User-visible notice.
+                pushSystem(
+                  ansiMsg(
+                    `\x1b[33m/${skillId}：当前文件约 ${sliced.totalLines} 行，超过 ${MAX_SKILL_SCOPE_LINES} 行上限；已自动选中第 ${sliced.startLine1}-${sliced.endLine1} 行（围绕光标）并仅发送该选区片段。\x1b[0m`
+                  )
+                )
+
+                // Model-visible notice: inject a short prefix into instruction.
+                const header = [
+                  '[ClawEditor context limit]',
+                  `NOTE: The editor buffer text below is TRUNCATED to avoid exceeding model context.`,
+                  `Original total lines: ${sliced.totalLines}. Provided line window: ${sliced.startLine1}-${sliced.endLine1}.`,
+                  `Do NOT assume or reference content outside the provided window.`,
+                  `You MUST NOT output replace_file. Only edit within the provided selection and output replace_selection with the provided UTF-16 offsets (selFrom/selTo).`,
+                  '',
+                ].join('\n')
+                instruction = header + instruction
+              }
+            }
+
             const ok = await send({
               action: 'skill',
               skillId,
               instruction,
-              ...(contextForSkillSend ?? contextForSend)!,
+              ...(sendCtx as any),
             })
             if (!ok) {
               pushSystem(
@@ -654,6 +806,15 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         if (localResult.newText === fileText) {
           pushSystem(ansiMsg('\x1b[33m本地命令没有产生变化\x1b[0m'))
         } else {
+          const selDiff =
+            localResult.selectionRange &&
+            localResult.selectionRange.from < localResult.selectionRange.to
+              ? {
+                  diffMode: 'selection' as const,
+                  selectionFrom: localResult.selectionRange.from,
+                  selectionTo: localResult.selectionRange.to,
+                }
+              : {}
           setPendingProposal({
             newText: localResult.newText,
             title: '本地命令',
@@ -661,6 +822,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             fileId: activeFile?.id,
             filePath: activeFile?.path,
             fileName: activeFile?.name,
+            ...selDiff,
           })
         }
         return
@@ -710,6 +872,14 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               pushSystem(ansiMsg('\x1b[33m剪贴板为空，未修改文档。\x1b[0m'))
               return
             }
+            const clipSelDiff =
+              localResult.op === 'replace_selection' && sel
+                ? {
+                    diffMode: 'selection' as const,
+                    selectionFrom: sel.from,
+                    selectionTo: sel.to,
+                  }
+                : {}
             setPendingProposal({
               newText,
               title: '本地命令',
@@ -717,6 +887,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               fileId: activeFile?.id,
               filePath: activeFile?.path,
               fileName: activeFile?.name,
+              ...clipSelDiff,
             })
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
@@ -763,6 +934,10 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               if (r.newText === fileText) {
                 pushSystem(ansiMsg('\x1b[33m意图未改变文档\x1b[0m'))
               } else {
+                const intentSel = selectionProposalFieldsFromReplaceSelectionIntent(
+                  intent,
+                  fileText.length
+                )
                 setPendingProposal({
                   newText: r.newText,
                   title: r.title,
@@ -770,6 +945,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                   fileId: activeFile?.id,
                   filePath: activeFile?.path,
                   fileName: activeFile?.name,
+                  ...(intentSel ?? {}),
                 })
                 pushSystem(
                   ansiMsg(
@@ -885,6 +1061,10 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       if (result.newText === baseText) {
         pushSystem(ansiMsg('\x1b[33m意图未改变文档\x1b[0m'))
       } else {
+        const intentSel = selectionProposalFieldsFromReplaceSelectionIntent(
+          payload.intent,
+          baseText.length
+        )
         setPendingProposal({
           requestId: payload.requestId,
           newText: result.newText,
@@ -893,6 +1073,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           fileId: payload.fileId,
           filePath: payload.filePath,
           fileName: payload.fileName,
+          ...(intentSel ?? {}),
         })
         pushSystem(
           ansiMsg(
