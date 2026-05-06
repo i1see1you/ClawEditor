@@ -15,6 +15,7 @@ interface MenuBarProps {
   isAgentShown?: boolean
   onOpenFind?: () => void
   canFind?: boolean
+  onOpenGotoLine?: () => void
   onToggleDiff?: () => void
   canDiff?: boolean
   isDiffShown?: boolean
@@ -23,6 +24,9 @@ interface MenuBarProps {
   isPreviewShown?: boolean
   theme: 'light' | 'dark'
   onToggleTheme: () => void
+  /** Goto Anything (opened tabs + optional :line). */
+  canGotoAnything?: boolean
+  onOpenGoto?: () => void
 }
 
 export function MenuBar({
@@ -39,6 +43,7 @@ export function MenuBar({
   isAgentShown = false,
   onOpenFind,
   canFind = false,
+  onOpenGotoLine,
   onToggleDiff,
   canDiff = false,
   isDiffShown = false,
@@ -47,6 +52,8 @@ export function MenuBar({
   isPreviewShown = false,
   theme,
   onToggleTheme,
+  canGotoAnything = false,
+  onOpenGoto,
 }: MenuBarProps) {
   const undoDepth = useEditorStore((s) => s.undoDepth)
   const redoDepth = useEditorStore((s) => s.redoDepth)
@@ -89,6 +96,21 @@ export function MenuBar({
         {canFind ? (
           <button type="button" className="menu-btn" onClick={onOpenFind}>
             查找
+          </button>
+        ) : null}
+        {canFind && onOpenGotoLine ? (
+          <button
+            type="button"
+            className="menu-btn"
+            onClick={onOpenGotoLine}
+            title="转到行 (⌘G / Ctrl+G)；支持 1-100 选行"
+          >
+            转到行
+          </button>
+        ) : null}
+        {canGotoAnything && onOpenGoto ? (
+          <button type="button" className="menu-btn" onClick={onOpenGoto} title="转到文件 (⌘P / Ctrl+P)">
+            转到文件
           </button>
         ) : null}
         {canDiff ? (

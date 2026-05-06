@@ -129,6 +129,187 @@ body {
   color: var(--text-primary);
 }
 
+/* Goto Anything (⌘P / Ctrl+P) */
+.goto-anything-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9500;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12vh 16px 16px;
+}
+
+.goto-anything-card {
+  width: min(560px, 100%);
+  max-height: min(72vh, 560px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+.goto-anything-title {
+  padding: 12px 14px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.goto-anything-sub {
+  padding: 4px 14px 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.goto-anything-input {
+  margin: 10px 14px 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  outline: none;
+}
+
+.goto-anything-input:focus {
+  border-color: var(--accent);
+}
+
+.goto-anything-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 8px 10px;
+}
+
+.goto-anything-empty {
+  padding: 16px 14px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.goto-anything-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: calc(100% - 4px);
+  margin: 2px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.goto-anything-row:hover,
+.goto-anything-row.active {
+  background: var(--bg-tertiary);
+}
+
+.goto-anything-row.current .goto-anything-name {
+  color: var(--accent);
+}
+
+.goto-anything-name {
+  font-weight: 500;
+}
+
+.goto-anything-path {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  word-break: break-all;
+}
+
+/* Goto Line (Ctrl/Cmd+G) — Sublime-style */
+.goto-line-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9600;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 18vh 16px 16px;
+}
+
+.goto-line-card {
+  width: min(360px, 100%);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  padding: 0 0 12px;
+  overflow: hidden;
+}
+
+.goto-line-title {
+  padding: 12px 14px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.goto-line-sub {
+  padding: 4px 14px 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.goto-line-input {
+  display: block;
+  width: calc(100% - 28px);
+  margin: 12px 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 15px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  outline: none;
+}
+
+.goto-line-input:focus {
+  border-color: var(--accent);
+}
+
+.goto-line-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 4px 14px 0;
+}
+
+.goto-line-btn {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.goto-line-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
 /* Main workspace (editor + optional agent dock) */
 .main-workspace {
   flex: 1;

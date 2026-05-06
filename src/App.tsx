@@ -1,4 +1,12 @@
-import { useState, useEffect, useCallback, useRef, type MouseEvent as ReactMouseEvent } from 'react'
+import {
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useCallback,
+  useMemo,
+  useRef,
+  type MouseEvent as ReactMouseEvent,
+} from 'react'
 import { readTextFile } from '@tauri-apps/plugin-fs'
 import { useFileStore } from './store/fileStore'
 import { TabBar } from './components/TabBar'
@@ -9,9 +17,13 @@ import { MenuBar } from './components/MenuBar'
 import { DiffPanel } from './components/DiffPanel'
 import { AgentPanel } from './components/AgentPanel'
 import { ExternalFileChangedDialog } from './components/ExternalFileChangedDialog'
+import { GotoAnything } from './components/GotoAnything'
+import { GotoLineDialog } from './components/GotoLineDialog'
 import { openSearchPanel } from '@codemirror/search'
 import { undo, redo } from '@codemirror/commands'
 import { useEditorStore } from './store/editorStore'
+import { gotoLineInEditor, selectLineRangeInEditor } from './utils/gotoLine'
+import type { GotoLineCommand } from './utils/gotoLineInput'
 import {
   openFile,
   detectLanguage,
@@ -45,6 +57,9 @@ function App() {
   const agentDragRef = useRef<{ startY: number; startHeight: number } | null>(null)
   /** When disk changed while buffer has unsaved edits (focus-time check). */
   const [externalConflictFileId, setExternalConflictFileId] = useState<string | null>(null)
+  const [gotoOpen, setGotoOpen] = useState(false)
+  const [gotoLineOpen, setGotoLineOpen] = useState(false)
+  const pendingGotoLineRef = useRef<{ targetId: string; line: number } | null>(null)
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
@@ -131,6 +146,88 @@ function App() {
     typeof activeFile?.content === 'string' &&
     Boolean(activeFile?.path)
   const canFind = Boolean(activeFile) && !isPdf && !showDiff
+
+  const gotoTabItems = useMemo(
+    () =>
+      files
+        .filter((f) => !f.isPdf && typeof f.content === 'string')
+        .map((f) => ({ id: f.id, name: f.name, path: f.path })),
+    [files]
+  )
+
+  const canGotoAnything = gotoTabItems.length > 0
+
+  const handleGotoPick = useCallback((fileId: string, line?: number) => {
+    setGotoOpen(false)
+    const priorId = useFileStore.getState().activeFileId
+    setActiveFileId(fileId)
+    if (line !== undefined && line >= 1) {
+      if (fileId === priorId) {
+        requestAnimationFrame(() => {
+          const view = useEditorStore.getState().editorView
+          if (view) gotoLineInEditor(view, line)
+        })
+      } else {
+        pendingGotoLineRef.current = { targetId: fileId, line }
+      }
+    } else {
+      pendingGotoLineRef.current = null
+    }
+  }, [setActiveFileId])
+
+  useLayoutEffect(() => {
+    const p = pendingGotoLineRef.current
+    if (!p || p.targetId !== activeFileId) return
+    const id = requestAnimationFrame(() => {
+      const view = useEditorStore.getState().editorView
+      if (!view) return
+      if (pendingGotoLineRef.current?.targetId !== p.targetId) return
+      gotoLineInEditor(view, p.line)
+      pendingGotoLineRef.current = null
+    })
+    return () => cancelAnimationFrame(id)
+  }, [activeFileId])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key !== 'p') return
+      if (!canGotoAnything) return
+      e.preventDefault()
+      e.stopPropagation()
+      setGotoLineOpen(false)
+      setGotoOpen((o) => !o)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [canGotoAnything])
+
+  useEffect(() => {
+    if (!canFind) setGotoLineOpen(false)
+  }, [canFind])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return
+      if (e.key.toLowerCase() !== 'g') return
+      if (!canFind) return
+      e.preventDefault()
+      e.stopPropagation()
+      setGotoOpen(false)
+      setGotoLineOpen((v) => !v)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [canFind])
+
+  const handleGotoLineSubmit = useCallback((cmd: GotoLineCommand) => {
+    const view = useEditorStore.getState().editorView
+    if (!view) return
+    if (cmd.kind === 'goto') {
+      gotoLineInEditor(view, cmd.line)
+    } else {
+      selectLineRangeInEditor(view, cmd.fromLine, cmd.toLine)
+    }
+  }, [])
 
   useEffect(() => {
     if (!canPreview) setShowPreview(false)
@@ -405,6 +502,15 @@ function App() {
         }}
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+        canGotoAnything={canGotoAnything}
+        onOpenGoto={() => {
+          setGotoLineOpen(false)
+          setGotoOpen(true)
+        }}
+        onOpenGotoLine={() => {
+          setGotoOpen(false)
+          setGotoLineOpen(true)
+        }}
       />
       <TabBar
         files={files}
@@ -426,6 +532,7 @@ function App() {
             <div className="welcome-screen">
               <h1>ClawEditor</h1>
               <p>按 Ctrl/Cmd+O 打开文件</p>
+              {canGotoAnything ? <p>按 Ctrl/Cmd+P 转到已打开文件（可后缀 :行号）</p> : null}
               <button onClick={handleOpenFile}>打开文件</button>
             </div>
           )}
@@ -454,6 +561,18 @@ function App() {
           onKeepEditing={() => setExternalConflictFileId(null)}
         />
       ) : null}
+      <GotoAnything
+        open={gotoOpen}
+        onClose={() => setGotoOpen(false)}
+        items={gotoTabItems}
+        activeFileId={activeFileId}
+        onPick={handleGotoPick}
+      />
+      <GotoLineDialog
+        open={gotoLineOpen}
+        onClose={() => setGotoLineOpen(false)}
+        onSubmit={handleGotoLineSubmit}
+      />
     </div>
   )
 }

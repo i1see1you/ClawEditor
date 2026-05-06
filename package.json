@@ -29,6 +29,7 @@
     "@uiw/react-codemirror": "^4.23.6",
     "diff": "^8.0.2",
     "dompurify": "^3.2.6",
+    "fuzzysort": "^3.1.0",
     "html2canvas": "^1.4.1",
     "jspdf": "^2.5.2",
     "marked": "^15.0.7",
