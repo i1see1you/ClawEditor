@@ -56,6 +56,11 @@ type ClawEditorConfig = {
    * - false: caller may send empty text to avoid wasting context budget
    */
   requiresScopeText?: boolean
+  /**
+   * When true, `/skillId` with no trailing instruction still runs the skill (send to Gateway)
+   * instead of only printing ```help```. Use for skills driven by editor scope text alone.
+   */
+  allowEmptyInstruction?: boolean
   args?: ArgsSpec
   completions?: CompletionRule[]
   instructionWrapper?: {
@@ -100,6 +105,12 @@ export function validateClaweditorConfig(cfg: ClawEditorConfig): {
   ) {
     errors.push('requiresScopeText 必须为 boolean（true/false）')
   }
+  if (
+    cfg.allowEmptyInstruction !== undefined &&
+    typeof cfg.allowEmptyInstruction !== 'boolean'
+  ) {
+    errors.push('allowEmptyInstruction 必须为 boolean（true/false）')
+  }
   if (cfg.completions) {
     const seen = new Set<string>()
     for (const [i, r] of cfg.completions.entries()) {
@@ -127,7 +138,7 @@ export function validateClaweditorConfig(cfg: ClawEditorConfig): {
         }
       }
     }
-  } else {
+  } else if (!cfg.allowEmptyInstruction) {
     warnings.push('未配置 completions（不会触发参数补全）。')
   }
   if (errors.length) return { ok: false, errors, warnings }

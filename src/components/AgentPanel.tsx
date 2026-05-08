@@ -695,9 +695,11 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             useAgentStore.setState({ lastError: null })
             const cfgAll = getClaweditorConfigForSkill(skillId)
             const hasCompletions = Boolean(cfgAll?.completions && cfgAll.completions.length > 0)
+            const allowEmptyInstruction = cfgAll?.allowEmptyInstruction === true
 
-            // Empty rest: prefer completions when present; otherwise show help.
-            if (!rest && !hasCompletions) {
+            // Empty rest: prefer completions when present; otherwise show help unless
+            // ```claweditor``` sets allowEmptyInstruction (scope-driven skills like /aicorrect).
+            if (!rest && !hasCompletions && !allowEmptyInstruction) {
               useAgentStore.setState({ lastError: null })
               pushSystem(
                 getSkillHelpText(skillId) ?? `未在 skills/${skillId}/SKILL.md 中找到 help 文档块。`

@@ -6,6 +6,7 @@
 
 - **`version`**: `1`（必填）
 - **`requiresScopeText`**: `true|false`（可选，缺省为 `true`）
+- **`allowEmptyInstruction`**: `true|false`（可选，缺省为 `false`）。为 `true` 时，用户只输入 `/skillId`（命令后无其它文字）也会执行该 skill 并发往 Gateway，而不会仅打印 ` ```help``` `。适用于主要依赖编辑器作用域正文的 skill（例如 `/aicorrect`）。
 - **`args`**: 参数检测与缺参判定（可选）
 - **`completions`**: 补全规则列表（可选）
 - **`instructionWrapper`**: 最终 instruction 外层包装（可选）
