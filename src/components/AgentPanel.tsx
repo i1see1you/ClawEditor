@@ -1,5 +1,6 @@
 import { useEffect, useRef, useMemo, useCallback, useState } from 'react'
 import { computeSelectionDiffSlices } from '../utils/selectionMergeDiff'
+import { buildSideBySideRows, mergeLinesByAdoption } from '../utils/lineAlignedPartialMerge'
 import { selectionProposalFieldsFromReplaceSelectionIntent } from '../utils/pendingProposalSelectionDiff'
 import { useAgentStore } from '../store/agentStore'
 import { useEditorStore } from '../store/editorStore'
@@ -255,6 +256,9 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   const proposalDiff = useMemo(() => {
     if (!pendingProposal) return null
     const p = pendingProposal
+    let before: string
+    let after: string
+    let subtitle: string
     if (
       p.diffMode === 'selection' &&
       p.selectionFrom !== undefined &&
@@ -267,24 +271,55 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         p.selectionTo
       )
       if (r.ok) {
-        return {
-          before: r.before,
-          after: r.after,
-          subtitle: '仅选区 vs 建议（应用后仍写入合并全文）',
-        }
+        before = r.before
+        after = r.after
+        subtitle = '仅选区 vs 建议（应用后仍写入合并全文）'
+      } else {
+        before = proposalFileText
+        after = p.newText
+        subtitle = '选区外也有变更或未对齐，已显示全文 diff'
       }
-      return {
-        before: proposalFileText,
-        after: p.newText,
-        subtitle: '选区外也有变更或未对齐，已显示全文 diff',
-      }
+    } else {
+      before = proposalFileText
+      after = p.newText
+      subtitle = '当前文件 vs 建议内容（全文）'
     }
-    return {
-      before: proposalFileText,
-      after: p.newText,
-      subtitle: '当前文件 vs 建议内容（全文）',
-    }
+    const sideBySide =
+      p.proposalDiffVariant === 'side_by_side_interactive'
+        ? buildSideBySideRows(before, after)
+        : null
+    return { before, after, subtitle, sideBySide }
   }, [pendingProposal, proposalFileText])
+
+  /** Row indices (0-based) where the proposal “after” line is adopted for partial apply. */
+  const [adoptedDiffLines, setAdoptedDiffLines] = useState<Set<number>>(() => new Set())
+
+  useEffect(() => {
+    const sb = proposalDiff?.sideBySide
+    if (!sb?.lineAligned) {
+      setAdoptedDiffLines(new Set())
+      return
+    }
+    setAdoptedDiffLines(new Set(sb.rows.filter((r) => r.changed).map((r) => r.lineIndex)))
+  }, [
+    pendingProposal?.newText,
+    pendingProposal?.selectionFrom,
+    pendingProposal?.selectionTo,
+    pendingProposal?.proposalDiffVariant,
+    pendingProposal?.fileId,
+    proposalDiff?.before,
+    proposalDiff?.after,
+    proposalDiff?.sideBySide?.lineAligned,
+  ])
+
+  const toggleAdoptedLine = useCallback((lineIndex: number) => {
+    setAdoptedDiffLines((prev) => {
+      const next = new Set(prev)
+      if (next.has(lineIndex)) next.delete(lineIndex)
+      else next.add(lineIndex)
+      return next
+    })
+  }, [])
 
   const classifyAction = (raw: string): { action: OpenClawAction; instruction: string } => {
     // Single chat action; /edit and /<skill> are handled separately.
@@ -1177,10 +1212,13 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           filePath: payload.filePath,
           fileName: payload.fileName,
           ...(intentSel ?? {}),
+          ...(payload.skillId === 'aicorrect'
+            ? { proposalDiffVariant: 'side_by_side_interactive' as const }
+            : {}),
         })
         pushSystem(
           ansiMsg(
-            '\x1b[33m已生成修改提案：请在弹窗中确认 diff 后再点击「应用修改」。\x1b[0m'
+            '\x1b[33m已生成修改提案：请在弹窗中确认 diff 后再应用。\x1b[0m'
           )
         )
       }
@@ -1200,7 +1238,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     handleApplyIntentResult,
   ])
 
-  const applyProposal = () => {
+  const applyProposalAll = useCallback(() => {
     if (!pendingProposal) return
     const targetId =
       pendingProposal.fileId ??
@@ -1212,7 +1250,75 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     markModified(targetId, true)
     clearProposal()
     pushSystem(ansiMsg('\x1b[32m修改已应用\x1b[0m'))
-  }
+  }, [
+    pendingProposal,
+    proposalTargetFileByPath?.id,
+    effectiveProposalTargetFile?.id,
+    activeFile?.id,
+    updateContent,
+    markModified,
+    clearProposal,
+    pushSystem,
+  ])
+
+  const applyProposalSelected = useCallback(() => {
+    if (!pendingProposal || !proposalDiff) return
+    const sb = proposalDiff.sideBySide
+    if (!sb?.lineAligned) {
+      pushSystem(ansiMsg('\x1b[31m无法按行部分应用（行数不一致）。\x1b[0m'))
+      return
+    }
+    const changedRows = sb.rows.filter((r) => r.changed)
+    if (changedRows.length > 0 && !changedRows.some((r) => adoptedDiffLines.has(r.lineIndex))) {
+      pushSystem(ansiMsg('\x1b[33m未选中任何修改（差异行需至少采纳一行）。\x1b[0m'))
+      return
+    }
+    const m = mergeLinesByAdoption(proposalDiff.before, proposalDiff.after, adoptedDiffLines, true)
+    if (!m.ok) {
+      pushSystem(ansiMsg(`\x1b[31m${m.message}\x1b[0m`))
+      return
+    }
+    let out = m.text
+    if (
+      pendingProposal.diffMode === 'selection' &&
+      pendingProposal.selectionFrom !== undefined &&
+      pendingProposal.selectionTo !== undefined
+    ) {
+      out = mergeRange(
+        proposalFileText,
+        pendingProposal.selectionFrom,
+        pendingProposal.selectionTo,
+        m.text
+      )
+    }
+    const targetId =
+      pendingProposal.fileId ??
+      proposalTargetFileByPath?.id ??
+      effectiveProposalTargetFile?.id ??
+      activeFile?.id
+    if (!targetId) return
+    updateContent(targetId, out)
+    markModified(targetId, true)
+    clearProposal()
+    pushSystem(ansiMsg('\x1b[32m已应用所选修改\x1b[0m'))
+  }, [
+    pendingProposal,
+    proposalDiff,
+    adoptedDiffLines,
+    proposalFileText,
+    proposalTargetFileByPath?.id,
+    effectiveProposalTargetFile?.id,
+    activeFile?.id,
+    updateContent,
+    markModified,
+    clearProposal,
+    pushSystem,
+  ])
+
+  const interactiveSideBySideProposal = Boolean(
+    pendingProposal?.proposalDiffVariant === 'side_by_side_interactive' &&
+      proposalDiff?.sideBySide?.lineAligned
+  )
 
   const handleConnect = () => {
     if (connection === 'open') {
@@ -1346,15 +1452,46 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                   proposalDiff?.subtitle ??
                   `${effectiveProposalTargetFile.name} vs 建议内容（应用到目标文件）`
                 }
+                variant={
+                  pendingProposal.proposalDiffVariant === 'side_by_side_interactive'
+                    ? 'sideBySide'
+                    : 'unified'
+                }
+                interactive={interactiveSideBySideProposal}
+                adoptedLineIndices={adoptedDiffLines}
+                onToggleAdoptedLine={toggleAdoptedLine}
               />
             </div>
             <div className="agent-proposal-buttons">
               <button type="button" className="agent-btn" onClick={clearProposal}>
                 取消
               </button>
-              <button type="button" className="agent-btn primary" onClick={applyProposal}>
-                应用修改
-              </button>
+              {interactiveSideBySideProposal ? (
+                <>
+                  <button
+                    type="button"
+                    className="agent-btn"
+                    onClick={applyProposalSelected}
+                  >
+                    应用所选修改
+                  </button>
+                  <button
+                    type="button"
+                    className="agent-btn primary"
+                    onClick={applyProposalAll}
+                  >
+                    应用全部修改
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="agent-btn primary"
+                  onClick={applyProposalAll}
+                >
+                  应用修改
+                </button>
+              )}
             </div>
           </div>
         </div>

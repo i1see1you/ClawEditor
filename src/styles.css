@@ -465,6 +465,96 @@ body {
   background: rgba(248, 81, 73, 0.18);
 }
 
+/* TextDiffView: side-by-side + interactive gutter */
+.text-diff-view--side-by-side .diff-body--side-by-side {
+  display: block;
+}
+
+.diff-sidebyside-head {
+  display: grid;
+  grid-template-columns: 36px 1fr 1fr;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+}
+
+.diff-sidebyside-gutter-spacer {
+  grid-column: 1;
+}
+
+.diff-sidebyside-col-title {
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.diff-body--side-by-side {
+  padding-bottom: 8px;
+}
+
+.diff-sidebyside-row {
+  display: grid;
+  grid-template-columns: 36px 1fr 1fr;
+  gap: 8px;
+  align-items: start;
+  padding: 1px 12px;
+  min-height: 1.6em;
+}
+
+.diff-sidebyside-row--changed .diff-sidebyside-left {
+  background: rgba(248, 81, 73, 0.12);
+}
+
+.diff-sidebyside-row--changed .diff-sidebyside-right {
+  background: rgba(46, 160, 67, 0.12);
+}
+
+.diff-sidebyside-gutter {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 2px;
+}
+
+.diff-line-adopt-btn {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.diff-line-adopt-btn:hover {
+  border-color: var(--text-secondary);
+}
+
+.diff-line-adopt-btn.is-on {
+  background: rgba(46, 160, 67, 0.28);
+  border-color: rgba(46, 160, 67, 0.45);
+}
+
+.diff-line-adopt-mark {
+  color: var(--text-secondary);
+  font-size: 12px;
+  user-select: none;
+}
+
+.diff-sidebyside-cell {
+  margin: 0;
+  white-space: pre;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
 .editor-panel .cm-editor {
   height: 100% !important;
 }
@@ -843,6 +933,7 @@ body {
 
 .agent-proposal-buttons {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
   padding: 10px 14px;

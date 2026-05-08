@@ -21,6 +21,8 @@ const pendingLocalSkillContext = new Map<
     fileId?: string
     filePath?: string
     fileName?: string
+    /** Set for local `action: 'skill'` requests (e.g. bind intent UI to /aicorrect). */
+    skillId?: string
   }
 >()
 
@@ -52,6 +54,8 @@ export interface PendingProposal {
   diffMode?: 'full' | 'selection'
   selectionFrom?: number
   selectionTo?: number
+  /** When set, proposal dialog uses interactive side-by-side diff (e.g. /aicorrect). */
+  proposalDiffVariant?: 'side_by_side_interactive'
 }
 
 export interface IncomingParsedIntent {
@@ -61,6 +65,8 @@ export interface IncomingParsedIntent {
   fileId?: string
   filePath?: string
   fileName?: string
+  /** Present when intent was bound to a single in-flight local skill request. */
+  skillId?: string
 }
 
 const WS_URL_KEY = 'openclaw.wsUrl'
@@ -185,12 +191,14 @@ function buildOpenClawHandlers(
               let boundFileId: string | undefined
               let boundFilePath: string | undefined
               let boundFileName: string | undefined
+              let boundSkillId: string | undefined
               if (pendingLocalSkillContext.size === 1) {
                 boundRequestId = pendingLocalSkillContext.keys().next().value as string
                 const ctx = pendingLocalSkillContext.get(boundRequestId)
                 boundFileId = ctx?.fileId
                 boundFilePath = ctx?.filePath
                 boundFileName = ctx?.fileName
+                boundSkillId = ctx?.skillId
                 clearEditTimeout(boundRequestId)
               }
               // Print raw JSON for debugging (command output window).
@@ -213,6 +221,7 @@ function buildOpenClawHandlers(
                   fileId: boundFileId,
                   filePath: boundFilePath,
                   fileName: boundFileName,
+                  skillId: boundSkillId,
                 },
               }))
               if (boundRequestId) pendingLocalSkillContext.delete(boundRequestId)
@@ -423,6 +432,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         fileId: file.id,
         filePath: file.path,
         fileName: file.name,
+        skillId: skillId ?? undefined,
       })
       clearEditTimeout(id)
       const label = skillId ? `/${skillId}` : '/skill'
