@@ -24,6 +24,14 @@ type ResolvedScope =
   | { ok: true; range: 'file' | 'selection' }
   | { ok: false; message: string }
 
+const PIPELINE_MAX_STEPS = 32
+const PIPELINE_FORBIDDEN = new Set<string>([
+  'find_literal',
+  'find_regex',
+  'goto_line',
+  'clarify',
+])
+
 /**
  * Gateway JSON often over-escapes regex (e.g. pattern parses to `\\d+` instead of `\d+`),
  * which matches a literal backslash + "d" and finds nothing for digits.
@@ -65,27 +73,63 @@ function selForResolved(
   return null
 }
 
-export function applyParsedIntent(
+function applyIntentPipeline(
   fileText: string,
-  selection: DocSelectionNullable,
-  version: number,
-  raw: unknown
+  initialSelection: DocSelectionNullable,
+  steps: unknown[]
 ): ApplyIntentResult {
-  if (version > SUPPORTED_INTENT_PROTOCOL_VERSION) {
-    return {
-      kind: 'error',
-      message: `不支持的意图协议版本 ${version}（客户端最高 ${SUPPORTED_INTENT_PROTOCOL_VERSION}），请升级应用。`,
+  if (steps.length === 0) {
+    return { kind: 'error', message: 'intent 管道数组不能为空。' }
+  }
+  if (steps.length > PIPELINE_MAX_STEPS) {
+    return { kind: 'error', message: `intent 管道最多 ${PIPELINE_MAX_STEPS} 步。` }
+  }
+
+  let work = fileText
+  const summaryParts: string[] = []
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]
+    if (!step || typeof step !== 'object' || Array.isArray(step)) {
+      return { kind: 'error', message: `管道第 ${i + 1} 步不是对象。` }
     }
-  }
-  if (version < 1 || !Number.isFinite(version)) {
-    return { kind: 'error', message: '缺少或无效的 version 字段。' }
+    const st = step as EditorIntentV1
+    const op = st.op
+    if (typeof op !== 'string') {
+      return { kind: 'error', message: `管道第 ${i + 1} 步缺少 op。` }
+    }
+    if (PIPELINE_FORBIDDEN.has(op)) {
+      return { kind: 'error', message: `管道第 ${i + 1} 步不支持 op: ${op}（仅允许编辑类 op）。` }
+    }
+    if (op === 'noop') continue
+
+    const stepSelection = i === 0 ? initialSelection : null
+    const r = applySingleIntentObject(work, stepSelection, st)
+    if (r.kind === 'noop') continue
+    if (r.kind !== 'edit') {
+      return {
+        kind: 'error',
+        message: `管道第 ${i + 1} 步（${op}）未产生可串行的编辑结果（得到 ${r.kind}）。`,
+      }
+    }
+    work = r.newText
+    summaryParts.push(r.summary)
   }
 
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return { kind: 'error', message: 'intent 必须是 JSON 对象。' }
+  return {
+    kind: 'edit',
+    newText: work,
+    summary: summaryParts.join(' → '),
+    title: 'OpenClaw 意图（管道）',
   }
+}
 
-  const intent = raw as EditorIntentV1
+/** One intent object (not an array); `docSelection` is editor选区，仅第一步管道传入原始选区。 */
+function applySingleIntentObject(
+  fileText: string,
+  docSelection: DocSelectionNullable,
+  intent: EditorIntentV1
+): ApplyIntentResult {
   const op = intent.op
   if (typeof op !== 'string') {
     return { kind: 'error', message: '缺少 op 字段。' }
@@ -99,11 +143,11 @@ export function applyParsedIntent(
     return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
   }
 
-  const resolved = resolveScope(intent.scope, selection)
+  const resolved = resolveScope(intent.scope, docSelection)
   if (!resolved.ok) {
     return { kind: 'error', message: resolved.message }
   }
-  const effSel = selForResolved(resolved.range, selection)
+  const effSel = selForResolved(resolved.range, docSelection)
 
   switch (op) {
     case 'replace_all': {
@@ -225,7 +269,7 @@ export function applyParsedIntent(
       if (typeof intent.offset === 'number' && Number.isFinite(intent.offset)) {
         offset = Math.trunc(intent.offset)
       } else {
-        offset = selection?.from ?? 0
+        offset = docSelection?.from ?? 0
       }
       if (offset < 0 || offset > fileText.length) {
         return { kind: 'error', message: 'insert_at 的 offset 超出文档范围。' }
@@ -255,10 +299,10 @@ export function applyParsedIntent(
       if (typeof text !== 'string') {
         return { kind: 'error', message: 'set_selection 需要 text 字段。' }
       }
-      if (!selection || selection.from === selection.to) {
+      if (!docSelection || docSelection.from === docSelection.to) {
         return { kind: 'error', message: 'set_selection 需要非空选区。' }
       }
-      const newText = mergeRange(fileText, selection.from, selection.to, text)
+      const newText = mergeRange(fileText, docSelection.from, docSelection.to, text)
       return {
         kind: 'edit',
         newText,
@@ -289,8 +333,8 @@ export function applyParsedIntent(
       }
       const caseSensitive = intent.caseSensitive !== false
       const restrictTo =
-        resolved.range === 'selection' && selection
-          ? { from: selection.from, to: selection.to }
+        resolved.range === 'selection' && docSelection
+          ? { from: docSelection.from, to: docSelection.to }
           : undefined
       const spec: FindQuerySpec = {
         search: needle,
@@ -320,8 +364,8 @@ export function applyParsedIntent(
       const flags = intent.flags ?? ''
       const ignoreCase = flags.includes('i')
       const restrictTo =
-        resolved.range === 'selection' && selection
-          ? { from: selection.from, to: selection.to }
+        resolved.range === 'selection' && docSelection
+          ? { from: docSelection.from, to: docSelection.to }
           : undefined
       const spec: FindQuerySpec = {
         search: pattern,
@@ -341,4 +385,34 @@ export function applyParsedIntent(
     default:
       return { kind: 'error', message: `不支持的 op: ${op}` }
   }
+}
+
+export function applyParsedIntent(
+  fileText: string,
+  selection: DocSelectionNullable,
+  version: number,
+  raw: unknown
+): ApplyIntentResult {
+  if (version > SUPPORTED_INTENT_PROTOCOL_VERSION) {
+    return {
+      kind: 'error',
+      message: `不支持的意图协议版本 ${version}（客户端最高 ${SUPPORTED_INTENT_PROTOCOL_VERSION}），请升级应用。`,
+    }
+  }
+  if (version < 1 || !Number.isFinite(version)) {
+    return { kind: 'error', message: '缺少或无效的 version 字段。' }
+  }
+
+  if (Array.isArray(raw)) {
+    if (version !== 2) {
+      return { kind: 'error', message: 'intent 为数组时 version 必须为 2（管道串行）。' }
+    }
+    return applyIntentPipeline(fileText, selection, raw)
+  }
+
+  if (!raw || typeof raw !== 'object') {
+    return { kind: 'error', message: 'intent 必须是 JSON 对象或非空数组。' }
+  }
+
+  return applySingleIntentObject(fileText, selection, raw as EditorIntentV1)
 }

@@ -1,5 +1,5 @@
 /** Supported protocol version for parsed_intent payloads (client + server). */
-export const SUPPORTED_INTENT_PROTOCOL_VERSION = 1
+export const SUPPORTED_INTENT_PROTOCOL_VERSION = 2
 
 export type IntentScope = 'auto' | 'file' | 'selection' | 'lines'
 

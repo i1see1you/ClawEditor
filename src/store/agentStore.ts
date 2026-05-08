@@ -173,16 +173,23 @@ function buildOpenClawHandlers(
           const obj = JSON.parse(t) as unknown
           if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
             const o = obj as Record<string, unknown>
+            const intentArr =
+              Array.isArray(o.intent) && o.intent.length > 0 && typeof o.version === 'number' && o.version === 2
+                ? o.intent
+                : null
             const intentObj =
               o.intent && typeof o.intent === 'object' && o.intent !== null && !Array.isArray(o.intent)
                 ? (o.intent as Record<string, unknown>)
                 : null
-            const op =
-              (intentObj && typeof intentObj.op === 'string'
-                ? intentObj.op
-                : typeof o.op === 'string'
-                  ? o.op
-                  : null) as string | null
+            const op = intentArr
+              ? typeof (intentArr[0] as Record<string, unknown>)?.op === 'string'
+                ? String((intentArr[0] as Record<string, unknown>).op)
+                : null
+              : (intentObj && typeof intentObj.op === 'string'
+                  ? intentObj.op
+                  : typeof o.op === 'string'
+                    ? o.op
+                    : null)
             const version = typeof o.version === 'number' ? o.version : 1
             if (op) {
               // If this came from a local skill (/aiedit, /aiimport), try to bind it to the
@@ -217,7 +224,7 @@ function buildOpenClawHandlers(
                 incomingIntent: {
                   requestId: boundRequestId,
                   version,
-                  intent: intentObj ?? o,
+                  intent: intentArr ?? intentObj ?? o,
                   fileId: boundFileId,
                   filePath: boundFilePath,
                   fileName: boundFileName,
