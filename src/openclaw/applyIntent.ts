@@ -404,8 +404,8 @@ export function applyParsedIntent(
   }
 
   if (Array.isArray(raw)) {
-    if (version !== 2) {
-      return { kind: 'error', message: 'intent 为数组时 version 必须为 2（管道串行）。' }
+    if (version !== 1) {
+      return { kind: 'error', message: 'intent 为数组时 version 必须为 1（管道串行）。' }
     }
     return applyIntentPipeline(fileText, selection, raw)
   }

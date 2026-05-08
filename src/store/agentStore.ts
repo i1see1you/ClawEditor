@@ -174,7 +174,7 @@ function buildOpenClawHandlers(
           if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
             const o = obj as Record<string, unknown>
             const intentArr =
-              Array.isArray(o.intent) && o.intent.length > 0 && typeof o.version === 'number' && o.version === 2
+              Array.isArray(o.intent) && o.intent.length > 0 && typeof o.version === 'number' && o.version === 1
                 ? o.intent
                 : null
             const intentObj =

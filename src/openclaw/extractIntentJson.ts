@@ -86,8 +86,8 @@ export function parseIntentEnvelope(raw: unknown): { version: number; intent: un
   const o = raw as Record<string, unknown>
   if (typeof o.version === 'number' && o.intent !== undefined) {
     if (Array.isArray(o.intent)) {
-      if (o.version !== 2) {
-        throw new Error('intent 为数组时 version 必须为 2')
+      if (o.version !== 1) {
+        throw new Error('intent 为数组时 version 必须为 1')
       }
       return { version: o.version, intent: o.intent }
     }
