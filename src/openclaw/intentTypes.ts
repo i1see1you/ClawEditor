@@ -7,6 +7,8 @@ export type IntentOp =
   | 'replace_all'
   | 'replace_regex'
   | 'delete_literal'
+  /** Delete whole lines where line matches regex or contains literal (same semantics as local /edit line drop-matching). */
+  | 'delete_matching_lines'
   | 'sort_lines'
   | 'dedupe_lines'
   | 'case_upper'
@@ -32,6 +34,8 @@ export type IntentOp =
 export interface EditorIntentV1 {
   op: IntentOp
   scope?: IntentScope
+  /** delete_matching_lines: `"regex"` | `"literal"` (optional if only pattern or only needle is set). */
+  mode?: string
   from?: string
   to?: string
   /** replace_selection: UTF-16 start (inclusive). */

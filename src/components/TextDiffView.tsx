@@ -9,6 +9,11 @@ type DiffLine =
 
 export type TextDiffVariant = 'unified' | 'sideBySide'
 
+/** Empty `<pre>` collapses to no visible height; use NBSP so unchanged blank lines still occupy one line. */
+function displayLineText(s: string): string {
+  return s === '' ? '\u00a0' : s
+}
+
 function splitLinesKeepEnds(text: string): string[] {
   if (!text) return ['']
   return text.split('\n')
@@ -112,8 +117,12 @@ export function TextDiffView({
                   </span>
                 ) : null}
               </div>
-              <pre className="diff-sidebyside-cell diff-sidebyside-left">{row.left}</pre>
-              <pre className="diff-sidebyside-cell diff-sidebyside-right">{row.right}</pre>
+              <pre className="diff-sidebyside-cell diff-sidebyside-left">
+                {displayLineText(row.left)}
+              </pre>
+              <pre className="diff-sidebyside-cell diff-sidebyside-right">
+                {displayLineText(row.right)}
+              </pre>
             </div>
           ))}
         </div>
@@ -135,7 +144,7 @@ export function TextDiffView({
             <div className="diff-prefix" aria-hidden="true">
               {l.kind === 'add' ? '+' : l.kind === 'del' ? '-' : ' '}
             </div>
-            <pre className="diff-text">{l.text}</pre>
+            <pre className="diff-text">{displayLineText(l.text)}</pre>
           </div>
         ))}
       </div>

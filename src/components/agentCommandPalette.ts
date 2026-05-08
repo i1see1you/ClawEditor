@@ -82,8 +82,14 @@ export const EDIT_SUBCOMMANDS: PaletteItem[] = [
   {
     id: 'edit-line',
     label: 'line …',
-    description: 'trim | sort | dedupe | empty | blank',
+    description: 'trim | sort | dedupe | empty | blank | drop-matching …',
     insertFromSlash: '/edit line ',
+  },
+  {
+    id: 'edit-line-drop-matching',
+    label: 'line drop-matching …',
+    description: '按正则或字面删整行（有选区则只处理选区所在行）',
+    insertFromSlash: '/edit line drop-matching ',
   },
   {
     id: 'edit-case',

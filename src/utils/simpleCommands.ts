@@ -6,10 +6,12 @@ import {
   applyReplaceAll,
   applyDeleteLiteral,
   applyDeleteLine1,
+  applyDeleteMatchingLines,
   applyLineOp,
   applyCaseOp,
   type DocSelectionNullable,
 } from './documentOps'
+import { parseEditDropMatchingPayload } from './parseEditDropMatching'
 
 export type LocalCommandSelection = NonNullable<DocSelectionNullable>
 
@@ -101,6 +103,25 @@ function tryDeleteSubstring(
   return null
 }
 
+function tryDeleteMatchingLinesCommand(
+  fileText: string,
+  instruction: string,
+  sel: DocSelectionNullable
+): { newText: string; summary: string } | null {
+  const t = instruction.trim()
+  const m = t.match(
+    /^(?:删除匹配行|drop-matching|delete-matching|grep-delete)\s+([\s\S]+)$/i
+  )
+  if (!m) return null
+  const parsed = parseEditDropMatchingPayload(m[1] ?? '')
+  if (!parsed) return null
+  const params =
+    parsed.mode === 'regex'
+      ? { mode: 'regex' as const, pattern: parsed.pattern, flags: parsed.flags }
+      : { mode: 'literal' as const, needle: parsed.needle }
+  return applyDeleteMatchingLines(fileText, sel, params, '删除匹配行')
+}
+
 function tryLineOps(
   fileText: string,
   instruction: string,
@@ -156,6 +177,7 @@ export function parseSimpleEditInstruction(
 
   return (
     tryReplace(fileText, t, sel) ??
+    tryDeleteMatchingLinesCommand(fileText, t, sel) ??
     tryLineOps(fileText, t, sel) ??
     tryCase(fileText, t, sel) ??
     tryDeleteSubstring(fileText, t, sel) ??

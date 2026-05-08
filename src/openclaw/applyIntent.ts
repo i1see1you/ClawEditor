@@ -3,6 +3,7 @@ import {
   applyReplaceAll,
   applyReplaceRegex,
   applyDeleteLiteral,
+  applyDeleteMatchingLines,
   applyLineOp,
   applyCaseOp,
   mergeRange,
@@ -146,6 +147,53 @@ export function applyParsedIntent(
       }
       const r = applyDeleteLiteral(fileText, effSel, needle, 'intent:delete')
       if (!r) return { kind: 'error', message: 'delete_literal 参数无效。' }
+      return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
+    }
+    case 'delete_matching_lines': {
+      let mode =
+        typeof intent.mode === 'string' ? intent.mode.trim().toLowerCase() : ''
+      if (mode !== 'literal' && mode !== 'regex') {
+        const hasPat = typeof intent.pattern === 'string' && intent.pattern.trim()
+        const hasNeedle = typeof intent.needle === 'string' && intent.needle.trim()
+        if (hasPat) mode = 'regex'
+        else if (hasNeedle) mode = 'literal'
+        else {
+          return {
+            kind: 'error',
+            message:
+              'delete_matching_lines 需要 mode:"literal"+needle，或 mode:"regex"+pattern（可选 flags）；也可只给 pattern 或 needle 以自动推断。',
+          }
+        }
+      }
+      if (mode === 'literal') {
+        const needle = intent.needle
+        if (typeof needle !== 'string' || !needle.trim()) {
+          return { kind: 'error', message: 'delete_matching_lines（literal）需要非空 needle。' }
+        }
+        const r = applyDeleteMatchingLines(fileText, effSel, { mode: 'literal', needle }, '删除匹配行')
+        if (!r) {
+          return { kind: 'error', message: 'delete_matching_lines 未删除任何行（无行包含 needle）。' }
+        }
+        return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
+      }
+      const patternRaw = intent.pattern
+      if (typeof patternRaw !== 'string' || !patternRaw.trim()) {
+        return { kind: 'error', message: 'delete_matching_lines（regex）需要非空 pattern。' }
+      }
+      if (intent.flags !== undefined && typeof intent.flags !== 'string') {
+        return { kind: 'error', message: 'delete_matching_lines 的 flags 必须是字符串。' }
+      }
+      const pattern = normalizeFindRegexPattern(patternRaw.trim())
+      const flags = intent.flags ?? ''
+      const r = applyDeleteMatchingLines(
+        fileText,
+        effSel,
+        { mode: 'regex', pattern, flags },
+        '删除匹配行'
+      )
+      if (!r) {
+        return { kind: 'error', message: 'delete_matching_lines 未删除任何行（正则无效或无匹配行）。' }
+      }
       return { kind: 'edit', newText: r.newText, summary: r.summary, title: 'OpenClaw 意图' }
     }
     case 'sort_lines': {

@@ -15,7 +15,8 @@ import { gotoLineInEditor } from '../utils/gotoLine'
 import { parseLocalFind } from '../utils/findCommand'
 import { applyFindInEditor } from '../utils/applyFindInEditor'
 import { parseSimpleEditInstruction } from '../utils/simpleCommands'
-import { mergeRange } from '../utils/documentOps'
+import { applyDeleteMatchingLines, mergeRange } from '../utils/documentOps'
+import { parseEditDropMatchingPayload } from '../utils/parseEditDropMatching'
 import {
   MAX_INSERT_CHARS,
   tryParseInsertAppendBody,
@@ -346,6 +347,8 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       "/edit replace <from> -> <to>   (也支持 '=>')",
       '/edit delete <text>',
       '/edit line <trim|sort|dedupe|empty|blank>',
+      '/edit line drop-matching /regex/flags   或  /edit line drop-matching \"字面\"  （删整行；有选区则只处理选区所在行范围）',
+      '/edit drop-matching …  与  /edit 删除匹配行 …  同上（可不写 line）',
       '/edit case <upper|lower|title>',
       '/edit insert --clipboard   或 /edit insert -c   （从剪贴板读入，插入光标处）',
       '/edit append --clipboard   或 /edit append -c   （从剪贴板读入，追加到文末）',
@@ -408,6 +411,29 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     }
 
     if (sub === 'line') {
+      const dropM = afterSub.match(
+        /^(?:drop-matching|delete-matching|grep-delete)\s+([\s\S]+)$/i
+      )
+      if (dropM) {
+        const parsed = parseEditDropMatchingPayload((dropM[1] ?? '').trim())
+        if (!parsed) {
+          return fail(
+            'drop-matching 需要有效参数。示例：/edit line drop-matching /\\\\bTODO\\\\b/i  或  /edit line drop-matching \"deprecated\"'
+          )
+        }
+        const params =
+          parsed.mode === 'regex'
+            ? { mode: 'regex' as const, pattern: parsed.pattern, flags: parsed.flags }
+            : { mode: 'literal' as const, needle: parsed.needle }
+        const r = applyDeleteMatchingLines(fileTextRaw, sel, params, '删除匹配行')
+        if (!r) {
+          return fail(
+            '删除匹配行未生效（正则无效、无命中行，或字面量未出现在任一行）。'
+          )
+        }
+        return { kind: 'edit', newText: r.newText, summary: r.summary }
+      }
+
       const op = (parts[1] ?? '').toLowerCase()
       const mapped =
         op === 'trim'

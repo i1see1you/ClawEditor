@@ -451,6 +451,7 @@ body {
 .diff-text {
   margin: 0;
   white-space: pre;
+  min-height: 1.6em;
 }
 
 .diff-ctx {
@@ -550,6 +551,7 @@ body {
   margin: 0;
   white-space: pre;
   overflow-x: auto;
+  min-height: 1.6em;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   font-size: 12.5px;
   line-height: 1.6;

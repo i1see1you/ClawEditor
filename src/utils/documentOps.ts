@@ -155,6 +155,62 @@ export function applyDeleteLiteral(
   return { newText, summary: `${label}「${needle}」（全文）` }
 }
 
+/** Strip `g` so per-line `.test` does not mutate `lastIndex` across calls. */
+function flagsForLineMatch(flags: string | undefined): string {
+  return (flags ?? '').replace(/g/g, '')
+}
+
+/**
+ * Delete whole lines that match a regex (`mode: 'regex'`) or contain a literal substring (`literal`).
+ * Selection: same line-range rules as `applyLineOp` (expand to line bounds).
+ */
+export function applyDeleteMatchingLines(
+  fileText: string,
+  sel: DocSelectionNullable,
+  params: { mode: 'regex'; pattern: string; flags?: string } | { mode: 'literal'; needle: string },
+  label: string
+): { newText: string; summary: string } | null {
+  let matchLine: (line: string) => boolean
+  if (params.mode === 'literal') {
+    matchLine = (line) => line.includes(params.needle)
+  } else {
+    let re: RegExp
+    try {
+      re = new RegExp(params.pattern, flagsForLineMatch(params.flags))
+    } catch {
+      return null
+    }
+    matchLine = (line) => re.test(line)
+  }
+
+  const runBlock = (block: string): { next: string; removed: number } => {
+    const lines = block.split('\n')
+    const kept: string[] = []
+    let removed = 0
+    for (const line of lines) {
+      if (matchLine(line)) removed += 1
+      else kept.push(line)
+    }
+    return { next: kept.join('\n'), removed }
+  }
+
+  if (sel && sel.from !== sel.to) {
+    const { start, end } = expandToLineBounds(fileText, sel.from, sel.to)
+    const block = fileText.slice(start, end)
+    const { next, removed } = runBlock(block)
+    if (removed === 0) return null
+    const newText = mergeRange(fileText, start, end, next)
+    return {
+      newText,
+      summary: `${label}（选区所在行范围，删 ${removed} 行）`,
+    }
+  }
+
+  const { next, removed } = runBlock(fileText)
+  if (removed === 0) return null
+  return { newText: next, summary: `${label}（全文，删 ${removed} 行）` }
+}
+
 export function applyDeleteLine1(
   fileText: string,
   sel: DocSelectionNullable,
