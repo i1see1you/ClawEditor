@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { OpenClawAction } from '../openclaw/types'
 import { OpenClawWsChannel } from '../openclaw/wsChannel'
 import { getSkillDef } from '../skills/skillRegistry'
+import { runRemoteEditorCommand } from '../agent/remoteCommandBridge'
 
 export type AgentConnection = 'idle' | 'connecting' | 'open' | 'error'
 
@@ -72,6 +73,18 @@ export interface IncomingParsedIntent {
 const WS_URL_KEY = 'openclaw.wsUrl'
 const GATEWAY_TOKEN_KEY = 'openclaw.gatewayToken'
 const GATEWAY_PASSWORD_KEY = 'openclaw.gatewayPassword'
+const REMOTE_EDIT_RECEIVE_KEY = 'openclaw.remoteEditReceive'
+
+function loadRemoteEditReceivePreference(): boolean {
+  if (typeof localStorage === 'undefined') return false
+  return localStorage.getItem(REMOTE_EDIT_RECEIVE_KEY) === '1'
+}
+
+function persistRemoteEditReceive(enabled: boolean) {
+  if (typeof localStorage === 'undefined') return
+  if (enabled) localStorage.setItem(REMOTE_EDIT_RECEIVE_KEY, '1')
+  else localStorage.removeItem(REMOTE_EDIT_RECEIVE_KEY)
+}
 
 function loadDefaultGatewayUrl(): string {
   if (typeof localStorage === 'undefined') return 'ws://127.0.0.1:18789'
@@ -105,6 +118,9 @@ interface AgentState {
   /** Use when `gateway.auth.mode` is password (or only password is configured). */
   gatewayPassword: string
   setGatewayPassword: (password: string) => void
+  /** Receive channel /edit-style commands via Gateway plugin (single holder per Gateway). */
+  remoteEditReceive: boolean
+  setRemoteEditReceive: (enabled: boolean) => Promise<void>
   connection: AgentConnection
   messages: AgentMessage[]
   streaming: string
@@ -318,6 +334,21 @@ function buildOpenClawHandlers(
       set((s) => ({
         messages: [...s.messages, { id: `s-${Date.now()}`, role: 'system' as const, content }],
       })),
+    onRemoteCommand: (line) => {
+      const ran = runRemoteEditorCommand(line)
+      if (!ran) {
+        get().pushSystem(
+          '收到远程编辑器命令，但 Agent 面板未就绪。请打开主界面中的 Agent 面板后再从 Channel 发送命令。'
+        )
+      }
+    },
+    onRemoteEditHoldLost: () => {
+      persistRemoteEditReceive(false)
+      set({ remoteEditReceive: false })
+      get().pushSystem(
+        '远程编辑接收已失效（连接断开、租约过期或其他会话占用）。如需继续接收频道命令，请重新勾选「开启远程编辑」。'
+      )
+    },
   }
 }
 
@@ -341,6 +372,29 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     if (typeof localStorage !== 'undefined') {
       if (password.trim()) localStorage.setItem(GATEWAY_PASSWORD_KEY, password)
       else localStorage.removeItem(GATEWAY_PASSWORD_KEY)
+    }
+  },
+  remoteEditReceive: loadRemoteEditReceivePreference(),
+  setRemoteEditReceive: async (enabled: boolean) => {
+    const c = wsChannel
+    if (!enabled) {
+      if (c && get().connection === 'open') {
+        await c.releaseRemoteEditReceive().catch(() => {})
+      }
+      persistRemoteEditReceive(false)
+      set({ remoteEditReceive: false })
+      return
+    }
+    persistRemoteEditReceive(true)
+    set({ remoteEditReceive: true })
+    if (c && get().connection === 'open') {
+      try {
+        await c.claimRemoteEditReceive()
+      } catch (e) {
+        persistRemoteEditReceive(false)
+        set({ remoteEditReceive: false })
+        throw e instanceof Error ? e : new Error(String(e))
+      }
     }
   },
   connection: 'idle',
@@ -373,6 +427,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         gatewayPassword: gatewayPassword,
       })
       await wsChannel.connect()
+      if (wsChannel && get().remoteEditReceive) {
+        try {
+          await wsChannel.claimRemoteEditReceive()
+        } catch (e) {
+          persistRemoteEditReceive(false)
+          const msg = e instanceof Error ? e.message : String(e)
+          set({ remoteEditReceive: false })
+          get().pushSystem(`开启远程编辑失败：${msg}`)
+        }
+      }
     } catch (e) {
       wsChannel = null
       set({
@@ -384,6 +448,13 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   disconnect: async () => {
     const c = wsChannel
+    if (c && get().remoteEditReceive) {
+      try {
+        await c.releaseRemoteEditReceive()
+      } catch {
+        /* ignore */
+      }
+    }
     wsChannel = null
     if (c) {
       await c.disconnect().catch(() => {

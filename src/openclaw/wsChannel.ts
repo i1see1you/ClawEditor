@@ -9,6 +9,7 @@ import {
   FIND_INTENT_PARSE_STATIC_LINES,
   GATEWAY_BRACKET_HEADER,
 } from './config/gatewayPromptLines'
+import { isRemoteEditorCommandLine } from './remoteEditorCommand'
 
 let wsCounter = 0
 
@@ -51,6 +52,10 @@ export class OpenClawWsChannel {
     }) => void
     clearStreaming?: () => void
     pushSystem?: (content: string) => void
+    /** Gateway plugin `claweditor.command` → same path as AgentPanel `processCommand`. */
+    onRemoteCommand?: (line: string, meta: { deliveryId?: string }) => void
+    /** Holder lost (renew rejected / lease) while remote edit was enabled. */
+    onRemoteEditHoldLost?: () => void
   }
   private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   private turnBuffer = ''
@@ -58,6 +63,7 @@ export class OpenClawWsChannel {
   private messageSubscribed = false
   private subscribedSessionId: string | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
+  private remoteEditRenewTimer: ReturnType<typeof setInterval> | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   /** Single-flight: wait for assistant JSON when local /edit fails. */
   private intentParseWaiter: { resolve: (s: string) => void; reject: (e: Error) => void } | null = null
@@ -68,6 +74,8 @@ export class OpenClawWsChannel {
   private pendingDiffProposal: { path: string; newText: string } | null = null
   /** Local skill (/aiedit, /aiimport) should not use diff/tool proposals; JSON intent only. */
   private suppressToolDiffForLocalSkill = false
+  /** Dedupe `claweditor.command` by `deliveryId` from Gateway (FIFO cap). */
+  private deliveredRemoteCommandIds = new Set<string>()
   private url: string
   private manualClose = false
   /**
@@ -213,7 +221,7 @@ export class OpenClawWsChannel {
         },
         role,
         scopes,
-        caps: [],
+        caps: ['claweditor.command.v1'],
         commands: [],
         permissions: {},
         ...(useToken
@@ -255,6 +263,47 @@ export class OpenClawWsChannel {
     if (this.pingTimer) {
       clearInterval(this.pingTimer)
       this.pingTimer = null
+    }
+  }
+
+  private stopRemoteEditRenew(): void {
+    if (this.remoteEditRenewTimer) {
+      clearInterval(this.remoteEditRenewTimer)
+      this.remoteEditRenewTimer = null
+    }
+  }
+
+  private startRemoteEditRenew(): void {
+    this.stopRemoteEditRenew()
+    this.remoteEditRenewTimer = setInterval(() => {
+      void this.call('claweditor-gateway.renewRemoteEdit', {})
+        .then((payload) => {
+          const p = payload as { ok?: boolean }
+          if (p && p.ok === false) {
+            this.stopRemoteEditRenew()
+            this.handlers.onRemoteEditHoldLost?.()
+          }
+        })
+        .catch(() => {
+          /* transient network; keep trying until lease expires or reconnect */
+        })
+    }, 25_000)
+  }
+
+  /** Claim sole remote-edit receiver for this Gateway (must be connected). */
+  async claimRemoteEditReceive(): Promise<void> {
+    this.stopRemoteEditRenew()
+    await this.call('claweditor-gateway.claimRemoteEdit', {})
+    this.startRemoteEditRenew()
+  }
+
+  /** Release remote-edit holder on this connection (best-effort). */
+  async releaseRemoteEditReceive(): Promise<void> {
+    this.stopRemoteEditRenew()
+    try {
+      await this.call('claweditor-gateway.releaseRemoteEdit', {})
+    } catch {
+      /* ignore */
     }
   }
 
@@ -315,9 +364,57 @@ export class OpenClawWsChannel {
       return
     }
 
+    if (event === 'claweditor.command') {
+      this.handleClawEditorCommand(payload)
+      return
+    }
+
     if (event === 'shutdown') {
       this.handlers.onClose(new CloseEvent('close'))
     }
+  }
+
+  private handleClawEditorCommand(payload: Record<string, unknown>): void {
+    const ver = payload.version
+    if (ver !== undefined && ver !== 1) {
+      this.handlers.pushSystem?.(`[远程命令] 不支持的协议版本: ${String(ver)}`)
+      return
+    }
+
+    const lineRaw = payload.line
+    if (typeof lineRaw !== 'string' || !lineRaw.trim()) {
+      this.handlers.pushSystem?.('[远程命令] 缺少有效 line')
+      return
+    }
+    const line = lineRaw.trim()
+    if (!isRemoteEditorCommandLine(line)) {
+      this.handlers.pushSystem?.(
+        `[远程命令] 已拒绝（非白名单前缀）: ${line.length > 80 ? `${line.slice(0, 80)}…` : line}`
+      )
+      return
+    }
+
+    if (!this.handlers.onRemoteCommand) {
+      this.handlers.pushSystem?.(
+        '[远程命令] 无法执行：Agent 执行器未注册。请打开 Agent 面板后重试。'
+      )
+      return
+    }
+
+    const deliveryId = typeof payload.deliveryId === 'string' ? payload.deliveryId : undefined
+    if (deliveryId) {
+      if (this.deliveredRemoteCommandIds.has(deliveryId)) {
+        return
+      }
+      this.deliveredRemoteCommandIds.add(deliveryId)
+      while (this.deliveredRemoteCommandIds.size > 200) {
+        const oldest = this.deliveredRemoteCommandIds.values().next().value as string | undefined
+        if (oldest === undefined) break
+        this.deliveredRemoteCommandIds.delete(oldest)
+      }
+    }
+
+    this.handlers.onRemoteCommand(line, { deliveryId })
   }
 
   private handleSessionMessage(payload: Record<string, unknown>): void {
@@ -882,6 +979,7 @@ export class OpenClawWsChannel {
   async disconnect(): Promise<void> {
     this.manualClose = true
     this.stopPing()
+    this.stopRemoteEditRenew()
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
@@ -889,6 +987,7 @@ export class OpenClawWsChannel {
 
     this.rejectIntentParse(new Error('WebSocket 已断开'))
     this.cancelPendingDiffProposal()
+    this.deliveredRemoteCommandIds.clear()
 
     // Reject all pending
     this.pending.forEach(({ reject }) => reject(new Error('WebSocket 已断开')))

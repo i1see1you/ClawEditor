@@ -27,6 +27,7 @@ import { getClaweditorConfigForSkill, validateClaweditorConfig } from '../skills
 import { runSkillCompletions } from '../skills/completionEngine'
 import { getSkillDef, getSkillHelpText } from '../skills/skillRegistry'
 import { getCommandHintText } from '../commands/registry'
+import { setRemoteCommandExecutor } from '../agent/remoteCommandBridge'
 
 interface AgentPanelProps {
   activeFile: FileTab | undefined
@@ -186,6 +187,8 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   const setGatewayToken = useAgentStore((s) => s.setGatewayToken)
   const gatewayPassword = useAgentStore((s) => s.gatewayPassword)
   const setGatewayPassword = useAgentStore((s) => s.setGatewayPassword)
+  const remoteEditReceive = useAgentStore((s) => s.remoteEditReceive)
+  const setRemoteEditReceive = useAgentStore((s) => s.setRemoteEditReceive)
   const connection = useAgentStore((s) => s.connection)
   const prevConnectionRef = useRef(connection)
   const pendingProposal = useAgentStore((s) => s.pendingProposal)
@@ -1187,6 +1190,16 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   )
 
   useEffect(() => {
+    setRemoteCommandExecutor((line) => {
+      const trimmed = line.trim()
+      if (!trimmed) return
+      pushUser(`[Channel] ${trimmed}`)
+      processCommand(trimmed)
+    })
+    return () => setRemoteCommandExecutor(null)
+  }, [pushUser, processCommand])
+
+  useEffect(() => {
     if (!lastError) return
     pushSystem(ansiMsg(`\x1b[31m${lastError}\x1b[0m`))
   }, [lastError, pushSystem])
@@ -1390,6 +1403,23 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           disabled={connection === 'connecting'}
           title="仅当网关为 password 认证时填写 gateway.auth.password；与上一栏不要同时填（同时填时优先使用 Token）。"
         />
+        <label
+          className="agent-remote-edit-label"
+          title="同一 OpenClaw Gateway 仅允许一台编辑器接收频道发来的 /edit、/aiedit 等远程命令。需安装 claweditor-gateway 插件。"
+        >
+          <input
+            type="checkbox"
+            checked={remoteEditReceive}
+            disabled={connection === 'connecting'}
+            onChange={(e) => {
+              const v = e.target.checked
+              void setRemoteEditReceive(v).catch((err) => {
+                window.alert(err instanceof Error ? err.message : String(err))
+              })
+            }}
+          />
+          <span>开启远程编辑</span>
+        </label>
         <button
           type="button"
           className={`agent-btn${connection === 'open' ? '' : ' primary'}`}

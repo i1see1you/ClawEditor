@@ -1,0 +1,27 @@
+{
+  "id": "claweditor-gateway",
+  "name": "ClawEditor Gateway Bridge",
+  "description": "Intercepts channel slash commands (/edit, /aiedit, /aicorrect, /aiimport) and sends claweditor.command only to the ClawEditor connection that claimed remote edit (via Gateway RPC); skips default model dispatch when handled.",
+  "version": "1.0.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "onlyChannelIds": {
+        "type": "array",
+        "items": { "type": "string", "minLength": 1 },
+        "description": "If non-empty, only handle messages whose originating channel id is in this list."
+      },
+      "skipSessionKeySubstrings": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "If the session key contains any of these substrings (case-insensitive), do not intercept."
+      },
+      "dropIfSlow": {
+        "type": "boolean",
+        "default": true,
+        "description": "Passed to gateway broadcast (drop event for slow WebSocket consumers when true)."
+      }
+    }
+  }
+}

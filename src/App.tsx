@@ -537,17 +537,23 @@ function App() {
             </div>
           )}
         </div>
-        {showAgent && canAgent ? (
-          <>
-            <div
-              className="agent-dock-resize-handle"
-              role="separator"
-              aria-orientation="horizontal"
-              aria-label="调整 OpenClaw 面板高度"
-              onMouseDown={handleAgentResizeStart}
-            />
-            <AgentPanel activeFile={activeFile} height={agentPanelHeight} />
-          </>
+        {canAgent ? (
+          showAgent ? (
+            <>
+              <div
+                className="agent-dock-resize-handle"
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label="调整 OpenClaw 面板高度"
+                onMouseDown={handleAgentResizeStart}
+              />
+              <AgentPanel activeFile={activeFile} height={agentPanelHeight} />
+            </>
+          ) : (
+            <div className="agent-panel-remote-stub" aria-hidden>
+              <AgentPanel activeFile={activeFile} height={agentPanelHeight} />
+            </div>
+          )
         ) : null}
       </div>
       <StatusBar

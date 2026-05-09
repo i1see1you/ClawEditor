@@ -1,0 +1,25 @@
+{
+  "name": "@claweditor/openclaw-gateway-bridge",
+  "version": "1.0.0",
+  "description": "OpenClaw Gateway plugin: route channel /edit-style commands to ClawEditor via claweditor.command events",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.4.9"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": ["./index.js"],
+    "compat": {
+      "pluginApi": ">=2026.4.9",
+      "minGatewayVersion": "2026.4.9"
+    }
+  }
+}
