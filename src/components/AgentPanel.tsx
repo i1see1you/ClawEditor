@@ -28,6 +28,26 @@ import { runSkillCompletions } from '../skills/completionEngine'
 import { getSkillDef, getSkillHelpText } from '../skills/skillRegistry'
 import { getCommandHintText } from '../commands/registry'
 import { setRemoteCommandExecutor } from '../agent/remoteCommandBridge'
+import { acquireFileLock, releaseFileLock } from '../store/agentStore'
+import {
+  appendAuditLog,
+  newAuditCorrelationId,
+  type AuditFinishedOutcome,
+} from '../utils/auditLog'
+import { createPatch } from 'diff'
+
+/** In-flight slash / remote command audit row (paired accepted → finished). */
+type CommandAuditContext = {
+  correlationId: string
+  source: 'channel' | 'local'
+  command: string
+  startMs: number
+  channel?: string
+  sessionKey?: string
+  deliveryId?: string
+  fileId?: string
+  fileName?: string
+}
 
 interface AgentPanelProps {
   activeFile: FileTab | undefined
@@ -61,7 +81,19 @@ function ansiMsg(msg: string): string {
   return stripAnsi(msg)
 }
 
-const MAX_SKILL_SCOPE_LINES = 2000
+const REMOTE_DIFF_MAX_CHARS = 1800
+
+/** Generate a compact unified diff string for sending to Channel. */
+function generateUnifiedDiff(before: string, after: string, fileName: string): string {
+  const patch = createPatch(fileName, before, after, '', '', { context: 3 })
+  // createPatch output: line 0 = "Index: ...", line 1 = "===...", line 2 = "--- ...", line 3 = "+++ ..."
+  // Keep only the hunks (from line 4 onward).
+  const hunks = patch.split('\n').slice(4).join('\n').trim()
+  if (hunks.length <= REMOTE_DIFF_MAX_CHARS) return hunks
+  return hunks.slice(0, REMOTE_DIFF_MAX_CHARS) + '\n…（diff 过长，已截断，建议在编辑器查看完整内容）'
+}
+
+const MAX_SKILL_SCOPE_LINES = 1000
 
 function countLines(text: string): number {
   if (!text) return 1
@@ -72,85 +104,7 @@ function countLines(text: string): number {
   return n
 }
 
-function cursorLine1(text: string, cursorPos: number): number {
-  const pos = Math.max(0, Math.min(cursorPos, text.length))
-  let line = 1
-  for (let i = 0; i < pos; i++) {
-    if (text.charCodeAt(i) === 10 /* \n */) line++
-  }
-  return line
-}
 
-function sliceLineWindowAroundCursor(params: {
-  text: string
-  cursorPos: number
-  maxLines: number
-}): {
-  slicedText: string
-  startLine1: number
-  endLine1: number
-  totalLines: number
-  startOffset: number
-  endOffset: number
-} {
-  const { text, cursorPos, maxLines } = params
-  const totalLines = countLines(text)
-  if (totalLines <= maxLines) {
-    return {
-      slicedText: text,
-      startLine1: 1,
-      endLine1: totalLines,
-      totalLines,
-      startOffset: 0,
-      endOffset: text.length,
-    }
-  }
-
-  const cur1 = cursorLine1(text, cursorPos)
-  const before = Math.floor((maxLines - 1) / 2)
-  let startLine1 = Math.max(1, cur1 - before)
-  let endLine1 = Math.min(totalLines, startLine1 + maxLines - 1)
-  // If clamped at end, shift start up to maintain maxLines when possible.
-  startLine1 = Math.max(1, endLine1 - maxLines + 1)
-
-  // Convert line window to UTF-16 offsets without splitting the whole string.
-  let startOffset = 0
-  if (startLine1 > 1) {
-    let line = 1
-    for (let i = 0; i < text.length; i++) {
-      if (text.charCodeAt(i) === 10 /* \n */) {
-        line++
-        if (line === startLine1) {
-          startOffset = i + 1
-          break
-        }
-      }
-    }
-  }
-
-  let endOffset = text.length
-  if (endLine1 < totalLines) {
-    let line = 1
-    for (let i = 0; i < text.length; i++) {
-      if (text.charCodeAt(i) === 10 /* \n */) {
-        if (line === endLine1) {
-          endOffset = i
-          break
-        }
-        line++
-      }
-    }
-  }
-
-  return {
-    slicedText: text.slice(startOffset, endOffset),
-    startLine1,
-    endLine1,
-    totalLines,
-    startOffset,
-    endOffset,
-  }
-}
 
 function formatIntentForLog(version: number, intent: unknown): string {
   try {
@@ -180,6 +134,49 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   const [commandHistory, setCommandHistory] = useState<string[]>([])
   const chatLogRef = useRef<HTMLDivElement>(null)
   const [actionModal, setActionModal] = useState<ActionModalState>({ kind: 'none' })
+  /** Tracks meta for the currently pending remote command (for status callbacks). */
+  const pendingRemoteCmdRef = useRef<{
+    sessionKey?: string
+    channel?: string
+    command: string
+    startMs: number
+    lockedFileId?: string
+    correlationId?: string
+  } | null>(null)
+  /** Matches `accepted` NDJSON row until `finished` is written. */
+  const inFlightAuditRef = useRef<CommandAuditContext | null>(null)
+
+  const finishAuditCtx = useCallback(
+    (ctx: CommandAuditContext | null, outcome: AuditFinishedOutcome, reason?: string) => {
+      if (!ctx) return
+      const durationMs = Date.now() - ctx.startMs
+      void appendAuditLog({
+        event: 'finished',
+        correlationId: ctx.correlationId,
+        source: ctx.source,
+        command: ctx.command,
+        channel: ctx.channel,
+        sessionKey: ctx.sessionKey,
+        deliveryId: ctx.deliveryId,
+        file: ctx.fileName,
+        fileId: ctx.fileId,
+        outcome,
+        reason,
+        durationMs,
+      })
+      if (inFlightAuditRef.current?.correlationId === ctx.correlationId) {
+        inFlightAuditRef.current = null
+      }
+    },
+    []
+  )
+
+  const finishOpenCommandAudit = useCallback(
+    (outcome: AuditFinishedOutcome, reason?: string) => {
+      finishAuditCtx(inFlightAuditRef.current, outcome, reason)
+    },
+    [finishAuditCtx]
+  )
 
   const wsUrl = useAgentStore((s) => s.wsUrl)
   const setWsUrl = useAgentStore((s) => s.setWsUrl)
@@ -206,6 +203,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   const takeIncomingIntent = useAgentStore((s) => s.takeIncomingIntent)
   const pushUser = useAgentStore((s) => s.pushUser)
   const pushSystem = useAgentStore((s) => s.pushSystem)
+  const sendCommandStatus = useAgentStore((s) => s.sendCommandStatus)
 
   const selection = useEditorStore((s) => s.selection)
 
@@ -588,12 +586,14 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         case 'edit':
           if (result.newText === fileText) {
             pushSystem(ansiMsg('\x1b[33m意图未改变文档\x1b[0m'))
+            finishOpenCommandAudit('completed', 'no_document_change')
           } else {
             setPendingProposal({
               requestId,
               newText: result.newText,
               title: result.title,
               summary: result.summary,
+              remoteSessionKey: pendingRemoteCmdRef.current?.sessionKey,
             })
             pushSystem(
               ansiMsg(
@@ -606,10 +606,14 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           const view = useEditorStore.getState().editorView
           if (!view) {
             pushSystem(ansiMsg('\x1b[33m编辑器尚未就绪，无法跳转行\x1b[0m'))
+            finishOpenCommandAudit('failed', 'editor_not_ready')
             break
           }
           if (!gotoLineInEditor(view, result.line)) {
             pushSystem(ansiMsg(`\x1b[33m无法跳转到第 ${result.line} 行\x1b[0m`))
+            finishOpenCommandAudit('failed', 'goto_failed')
+          } else {
+            finishOpenCommandAudit('completed')
           }
           break
         }
@@ -617,33 +621,52 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           const view = useEditorStore.getState().editorView
           if (!view) {
             pushSystem(ansiMsg('\x1b[33m编辑器尚未就绪，无法查找\x1b[0m'))
+            finishOpenCommandAudit('failed', 'editor_not_ready')
             break
           }
           const fr = applyFindInEditor(view, result.spec)
           if (!fr.ok) {
             pushSystem(ansiMsg(`\x1b[31m${fr.message}\x1b[0m`))
+            finishOpenCommandAudit('failed', fr.message)
           } else {
             pushSystem(fr.summary)
+            finishOpenCommandAudit('completed')
           }
           break
         }
         case 'clarify':
           pushSystem(ansiMsg(`\x1b[33m${result.message}\x1b[0m`))
+          finishOpenCommandAudit('completed', 'clarify')
           break
         case 'noop':
+          finishOpenCommandAudit('completed', 'noop')
           break
         case 'error':
           pushSystem(ansiMsg(`\x1b[31m${result.message}\x1b[0m`))
+          finishOpenCommandAudit('failed', result.message)
           break
       }
     },
-    [fileText, setPendingProposal, pushSystem]
+    [fileText, setPendingProposal, pushSystem, finishOpenCommandAudit]
   )
 
   const processCommand = useCallback(
-    (line: string) => {
+    (line: string, opts?: { origin?: 'local' | 'remote' }) => {
+      const origin = opts?.origin ?? 'local'
+
       if (!canUseAgent || !contextForSend) {
         pushSystem(ansiMsg('\x1b[33m请打开文本文件以使用 Agent\x1b[0m'))
+        if (origin === 'local') {
+          const cid = newAuditCorrelationId()
+          void appendAuditLog({
+            event: 'finished',
+            correlationId: cid,
+            source: 'local',
+            command: line.trim(),
+            outcome: 'rejected',
+            reason: 'no_text_file_or_agent_disabled',
+          })
+        }
         return
       }
 
@@ -656,10 +679,124 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           : null
       const cursorPos = selection?.from ?? 0
 
+      const skillMatchEarly = trimmed.match(/^\/([a-zA-Z0-9_-]+)(?:\s+([\s\S]*))?$/)
+      if (skillMatchEarly) {
+        const earlySkillId = (skillMatchEarly[1] ?? '').toLowerCase()
+        if (earlySkillId === 'confirm' || earlySkillId === 'cancel') {
+          const logOrphanFinished = (reason: string) => {
+            void appendAuditLog({
+              event: 'finished',
+              correlationId: newAuditCorrelationId(),
+              source: origin === 'remote' ? 'channel' : 'local',
+              command: trimmed,
+              channel: inFlightAuditRef.current?.channel,
+              sessionKey: inFlightAuditRef.current?.sessionKey,
+              deliveryId: inFlightAuditRef.current?.deliveryId,
+              file: activeFile?.name,
+              fileId: activeFile?.id,
+              outcome: 'failed',
+              reason,
+            })
+          }
+          if (earlySkillId === 'confirm') {
+            const pp = useAgentStore.getState().pendingProposal
+            if (pp?.remoteSessionKey) {
+              const targetId =
+                pp.fileId ??
+                proposalTargetFileByPath?.id ??
+                effectiveProposalTargetFile?.id ??
+                activeFile?.id
+              if (targetId) {
+                updateContent(targetId, pp.newText)
+                markModified(targetId, true)
+                clearProposal()
+                pushSystem(ansiMsg('\x1b[32m修改已应用\x1b[0m'))
+                const remoteMeta = pendingRemoteCmdRef.current
+                if (remoteMeta?.sessionKey) {
+                  const durationMs = Date.now() - remoteMeta.startMs
+                  sendCommandStatus(
+                    remoteMeta.sessionKey,
+                    `[ClawEditor] ${remoteMeta.command} → completed (${durationMs}ms)`
+                  )
+                  pendingRemoteCmdRef.current = null
+                }
+                finishOpenCommandAudit('completed')
+              } else {
+                finishOpenCommandAudit('failed', 'no_target_file_for_confirm')
+              }
+            } else {
+              pushSystem(ansiMsg('\x1b[33m当前没有待确认的远程提案。\x1b[0m'))
+              if (origin === 'remote') {
+                finishOpenCommandAudit('failed', 'no_pending_remote_proposal')
+              } else {
+                logOrphanFinished('no_pending_remote_proposal')
+              }
+            }
+            return
+          }
+          const pp = useAgentStore.getState().pendingProposal
+          if (pp?.remoteSessionKey) {
+            const remoteMeta = pendingRemoteCmdRef.current
+            if (remoteMeta?.sessionKey) {
+              const durationMs = Date.now() - remoteMeta.startMs
+              sendCommandStatus(
+                remoteMeta.sessionKey,
+                `[ClawEditor] ${remoteMeta.command} → failed: user cancelled (${durationMs}ms)`
+              )
+              pendingRemoteCmdRef.current = null
+            }
+            clearProposal()
+            finishOpenCommandAudit('failed', 'user_cancelled')
+          } else {
+            pushSystem(ansiMsg('\x1b[33m当前没有待取消的远程提案。\x1b[0m'))
+            if (origin === 'remote') {
+              finishOpenCommandAudit('failed', 'no_pending_remote_proposal')
+            } else {
+              logOrphanFinished('no_pending_remote_proposal')
+            }
+          }
+          return
+        }
+      }
+
+      let auditSnap: CommandAuditContext | null = null
+
+      const finish = (outcome: AuditFinishedOutcome, reason?: string) => {
+        finishAuditCtx(auditSnap, outcome, reason)
+        auditSnap = null
+      }
+
+      if (origin === 'remote') {
+        auditSnap = inFlightAuditRef.current
+        if (!auditSnap || auditSnap.command !== trimmed) {
+          auditSnap = null
+        }
+      } else {
+        const correlationId = newAuditCorrelationId()
+        auditSnap = {
+          correlationId,
+          source: 'local',
+          command: trimmed,
+          startMs: Date.now(),
+          fileId: activeFile?.id,
+          fileName: activeFile?.name,
+        }
+        inFlightAuditRef.current = auditSnap
+        void appendAuditLog({
+          event: 'accepted',
+          correlationId,
+          source: 'local',
+          command: trimmed,
+          file: activeFile?.name,
+          fileId: activeFile?.id,
+        })
+      }
+
       const skillMatch = trimmed.match(/^\/([a-zA-Z0-9_-]+)(?:\s+([\s\S]*))?$/)
       if (skillMatch) {
         const skillId = (skillMatch[1] ?? '').toLowerCase()
         const rest = (skillMatch[2] ?? '').trim()
+
         if (skillId === 'find') {
           const selScope =
             sel && sel.from !== sel.to
@@ -669,11 +806,13 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           if (localFind.kind === 'help') {
             useAgentStore.setState({ lastError: null })
             pushSystem(localFind.text)
+            finish('completed', 'help')
             return
           }
           if (localFind.kind === 'error') {
             useAgentStore.setState({ lastError: null })
             pushSystem(ansiMsg(`\x1b[31m${localFind.message}\x1b[0m`))
+            finish('failed', localFind.message)
             return
           }
           if (localFind.kind === 'find') {
@@ -681,13 +820,16 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             const view = useEditorStore.getState().editorView
             if (!view) {
               pushSystem(ansiMsg('\x1b[33m编辑器尚未就绪，无法查找\x1b[0m'))
+              finish('failed', 'editor_not_ready')
               return
             }
             const fr = applyFindInEditor(view, localFind.spec)
             if (!fr.ok) {
               pushSystem(ansiMsg(`\x1b[31m${fr.message}\x1b[0m`))
+              finish('failed', fr.message)
             } else {
               pushSystem(fr.summary)
+              finish('completed')
             }
             return
           }
@@ -698,6 +840,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                   '\x1b[31m本地无法解析该 /find。请连接 OpenClaw Gateway，或改用 /find help。\x1b[0m'
                 )
               )
+              finish('rejected', 'gateway_url_missing')
               return
             }
             if (connection !== 'open') {
@@ -706,8 +849,10 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                   '\x1b[31m本地无法解析该 /find。请先连接 OpenClaw，或改用 /find help。\x1b[0m'
                 )
               )
+              finish('rejected', 'gateway_not_connected')
               return
             }
+            const snapFind = auditSnap
             void (async () => {
               useAgentStore.setState({ lastError: null })
               pushSystem(
@@ -731,16 +876,19 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                       '\x1b[31m模型返回了编辑类意图，并非查找。请改用 /edit 或重述查找需求。\x1b[0m'
                     )
                   )
+                  finishAuditCtx(snapFind, 'failed', 'unexpected_edit_intent')
                 } else {
                   handleApplyIntentResult(r)
                 }
               } catch (e) {
                 const msg = e instanceof Error ? e.message : String(e)
                 pushSystem(ansiMsg(`\x1b[31m${msg}\x1b[0m`))
+                finishAuditCtx(snapFind, 'failed', msg)
               }
             })()
             return
           }
+          finish('failed', 'unknown_find_branch')
           return
         }
         const def = getSkillDef(skillId)
@@ -749,12 +897,15 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             /^help$/i.test(rest) || /^h$/i.test(rest) || /^帮助$/.test(rest)
           if (!wsUrl.trim()) {
             pushSystem(ansiMsg('\x1b[31m请填写 Gateway 地址。\x1b[0m'))
+            finish('rejected', 'gateway_url_missing')
             return
           }
           if (connection !== 'open') {
             pushSystem(ansiMsg('\x1b[31m未连接 OpenClaw Gateway。请先连接。\x1b[0m'))
+            finish('rejected', 'gateway_not_connected')
             return
           }
+          const snapSkill = auditSnap
           void (async () => {
             useAgentStore.setState({ lastError: null })
             const cfgAll = getClaweditorConfigForSkill(skillId)
@@ -768,6 +919,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               pushSystem(
                 getSkillHelpText(skillId) ?? `未在 skills/${skillId}/SKILL.md 中找到 help 文档块。`
               )
+              finishAuditCtx(snapSkill, 'completed', 'help')
               return
             }
             if (wantsExplicitHelp) {
@@ -775,6 +927,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               pushSystem(
                 getSkillHelpText(skillId) ?? `未在 skills/${skillId}/SKILL.md 中找到 help 文档块。`
               )
+              finishAuditCtx(snapSkill, 'completed', 'help')
               return
             }
             if (cfgAll) {
@@ -788,6 +941,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                 if (v.warnings.length) {
                   pushSystem(ansiMsg(`\x1b[33m配置警告:\n- ${v.warnings.join('\n- ')}\x1b[0m`))
                 }
+                finishAuditCtx(snapSkill, 'failed', 'invalid_claweditor_config')
                 return
               }
               if (v.warnings.length) {
@@ -877,8 +1031,10 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               if (!r.ok) {
                 if ('cancelled' in r && r.cancelled) {
                   pushSystem(ansiMsg(`\x1b[33m已取消 /${skillId}。\x1b[0m`))
+                  finishAuditCtx(snapSkill, 'failed', 'user_cancelled')
                 } else {
                   pushSystem(ansiMsg(`\x1b[31m${(r as any).error}\x1b[0m`))
+                  finishAuditCtx(snapSkill, 'failed', String((r as any).error ?? 'completion_failed'))
                 }
                 return
               }
@@ -901,27 +1057,35 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               const scopeText = String(sendCtx.text ?? '')
               const total = countLines(scopeText)
               if (total > MAX_SKILL_SCOPE_LINES) {
-                const sliced = sliceLineWindowAroundCursor({
-                  text: scopeText,
-                  cursorPos: Number(sendCtx.cursorPos ?? 0),
-                  maxLines: MAX_SKILL_SCOPE_LINES,
-                })
-                // Promote truncation window to a real "virtual selection" so UI can show selection diff.
-                // Offsets must refer to the ORIGINAL full document.
+                // Take the first MAX_SKILL_SCOPE_LINES lines.
+                let endOffset = scopeText.length
+                let lineCount = 0
+                for (let i = 0; i < scopeText.length; i++) {
+                  if (scopeText.charCodeAt(i) === 10 /* \n */) {
+                    lineCount++
+                    if (lineCount === MAX_SKILL_SCOPE_LINES) {
+                      endOffset = i
+                      break
+                    }
+                  }
+                }
+                const slicedText = scopeText.slice(0, endOffset)
+
+                // Promote truncation to a real "virtual selection" so UI can show selection diff.
                 sendCtx = {
                   ...sendCtx,
-                  text: sliced.slicedText,
+                  text: slicedText,
                   selection: {
-                    from: sliced.startOffset,
-                    to: sliced.endOffset,
-                    text: sliced.slicedText,
+                    from: 0,
+                    to: endOffset,
+                    text: slicedText,
                   },
                 }
 
                 // User-visible notice.
                 pushSystem(
                   ansiMsg(
-                    `\x1b[33m/${skillId}：当前文件约 ${sliced.totalLines} 行，超过 ${MAX_SKILL_SCOPE_LINES} 行上限；已自动选中第 ${sliced.startLine1}-${sliced.endLine1} 行（围绕光标）并仅发送该选区片段。\x1b[0m`
+                    `\x1b[33m/${skillId}：当前文件约 ${total} 行，超过 ${MAX_SKILL_SCOPE_LINES} 行上限；已自动截取前 ${MAX_SKILL_SCOPE_LINES} 行并仅发送该片段。\x1b[0m`
                   )
                 )
 
@@ -929,8 +1093,8 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                 const header = [
                   '[ClawEditor context limit]',
                   `NOTE: The editor buffer text below is TRUNCATED to avoid exceeding model context.`,
-                  `Original total lines: ${sliced.totalLines}. Provided line window: ${sliced.startLine1}-${sliced.endLine1}.`,
-                  `Do NOT assume or reference content outside the provided window.`,
+                  `Original total lines: ${total}. Provided lines: 1-${MAX_SKILL_SCOPE_LINES} (first ${MAX_SKILL_SCOPE_LINES} lines only).`,
+                  `Do NOT assume or reference content outside the provided lines.`,
                   `You MUST NOT output replace_file. Only edit within the provided selection and output replace_selection with the provided UTF-16 offsets (selFrom/selTo).`,
                   '',
                 ].join('\n')
@@ -950,6 +1114,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                   '\x1b[31m请求未能发出（未连接或网关拒绝）。请查看工具栏状态与系统消息。\x1b[0m'
                 )
               )
+              finishAuditCtx(snapSkill, 'failed', 'send_rejected')
             }
           })()
           return
@@ -960,17 +1125,20 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       if (localResult.kind === 'help') {
         useAgentStore.setState({ lastError: null })
         pushSystem(localResult.text)
+        finish('completed', 'help')
         return
       }
       if (localResult.kind === 'error') {
         useAgentStore.setState({ lastError: null })
         pushSystem(ansiMsg(`\x1b[31m${localResult.message}\x1b[0m`))
+        finish('failed', localResult.message)
         return
       }
       if (localResult.kind === 'edit') {
         useAgentStore.setState({ lastError: null })
         if (localResult.newText === fileText) {
           pushSystem(ansiMsg('\x1b[33m本地命令没有产生变化\x1b[0m'))
+          finish('completed', 'no_document_change')
         } else {
           const selDiff =
             localResult.selectionRange &&
@@ -988,6 +1156,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             fileId: activeFile?.id,
             filePath: activeFile?.path,
             fileName: activeFile?.name,
+            remoteSessionKey: pendingRemoteCmdRef.current?.sessionKey,
             ...selDiff,
           })
         }
@@ -996,6 +1165,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
 
       if (localResult.kind === 'edit_clipboard') {
         useAgentStore.setState({ lastError: null })
+        const snapClip = auditSnap
         void (async () => {
           try {
             if (typeof navigator === 'undefined' || !navigator.clipboard?.readText) {
@@ -1004,6 +1174,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                   '\x1b[31m当前环境无法读取剪贴板（需安全上下文与权限）。\x1b[0m'
                 )
               )
+              finishAuditCtx(snapClip, 'failed', 'clipboard_unavailable')
               return
             }
             const text = await navigator.clipboard.readText()
@@ -1011,6 +1182,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               pushSystem(
                 ansiMsg(`\x1b[31m剪贴板内容过长（>${MAX_INSERT_CHARS} 字符）。\x1b[0m`)
               )
+              finishAuditCtx(snapClip, 'failed', 'clipboard_too_large')
               return
             }
             let newText: string
@@ -1029,6 +1201,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                 pushSystem(
                   ansiMsg('\x1b[31mreplace-selection 需要非空选区。\x1b[0m')
                 )
+                finishAuditCtx(snapClip, 'rejected', 'selection_required')
                 return
               }
               newText = mergeRange(fileText, sel.from, sel.to, text)
@@ -1036,6 +1209,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             }
             if (newText === fileText) {
               pushSystem(ansiMsg('\x1b[33m剪贴板为空，未修改文档。\x1b[0m'))
+              finishAuditCtx(snapClip, 'completed', 'no_document_change')
               return
             }
             const clipSelDiff =
@@ -1053,11 +1227,13 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               fileId: activeFile?.id,
               filePath: activeFile?.path,
               fileName: activeFile?.name,
+              remoteSessionKey: pendingRemoteCmdRef.current?.sessionKey,
               ...clipSelDiff,
             })
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
             pushSystem(ansiMsg(`\x1b[31m读取剪贴板失败: ${msg}\x1b[0m`))
+            finishAuditCtx(snapClip, 'failed', msg)
           }
         })()
         return
@@ -1070,6 +1246,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               '\x1b[31m本地无法解析该 /edit。请连接 OpenClaw Gateway，或改用子命令（/edit help）。\x1b[0m'
             )
           )
+          finish('rejected', 'gateway_url_missing')
           return
         }
         if (connection !== 'open') {
@@ -1078,8 +1255,10 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               '\x1b[31m本地无法解析该 /edit。请先连接 OpenClaw，或改用子命令（/edit help）。\x1b[0m'
             )
           )
+          finish('rejected', 'gateway_not_connected')
           return
         }
+        const snapEditFb = auditSnap
         void (async () => {
           useAgentStore.setState({ lastError: null })
           pushSystem(
@@ -1099,6 +1278,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             if (r.kind === 'edit') {
               if (r.newText === fileText) {
                 pushSystem(ansiMsg('\x1b[33m意图未改变文档\x1b[0m'))
+                finishAuditCtx(snapEditFb, 'completed', 'no_document_change')
               } else {
                 const intentSel = selectionProposalFieldsFromReplaceSelectionIntent(
                   intent,
@@ -1111,6 +1291,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                   fileId: activeFile?.id,
                   filePath: activeFile?.path,
                   fileName: activeFile?.name,
+                  remoteSessionKey: pendingRemoteCmdRef.current?.sessionKey,
                   ...(intentSel ?? {}),
                 })
                 pushSystem(
@@ -1125,23 +1306,30 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
             pushSystem(ansiMsg(`\x1b[31m${msg}\x1b[0m`))
+            finishAuditCtx(snapEditFb, 'failed', msg)
           }
         })()
         return
       }
 
       const { action, instruction } = classifyAction(trimmed)
-      if (!instruction) return
+      if (!instruction) {
+        finish('rejected', 'unknown_command')
+        return
+      }
 
       if (!wsUrl.trim()) {
         pushSystem(ansiMsg('\x1b[31m请填写 Gateway 地址。\x1b[0m'))
+        finish('rejected', 'gateway_url_missing')
         return
       }
       if (connection !== 'open') {
         pushSystem(ansiMsg('\x1b[31m未连接 OpenClaw Gateway。请先连接。\x1b[0m'))
+        finish('rejected', 'gateway_not_connected')
         return
       }
 
+      const snapGateway = auditSnap
       void (async () => {
         const ok = await send({ action, instruction, ...contextForSend })
         if (!ok) {
@@ -1150,6 +1338,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               '\x1b[31m请求未能发出（未连接或网关拒绝）。请查看工具栏状态与系统消息。\x1b[0m'
             )
           )
+          finishAuditCtx(snapGateway, 'failed', 'send_rejected')
         }
       })()
     },
@@ -1167,6 +1356,15 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       parseFindIntentFallback,
       handleApplyIntentResult,
       pushSystem,
+      proposalTargetFileByPath,
+      effectiveProposalTargetFile,
+      activeFile,
+      updateContent,
+      markModified,
+      clearProposal,
+      sendCommandStatus,
+      finishAuditCtx,
+      finishOpenCommandAudit,
     ]
   )
 
@@ -1184,25 +1382,166 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         }
         return next
       })
-      processCommand(trimmed)
+      processCommand(trimmed, { origin: 'local' })
     },
     [pushUser, processCommand]
   )
 
   useEffect(() => {
-    setRemoteCommandExecutor((line) => {
+    setRemoteCommandExecutor((line, meta) => {
       const trimmed = line.trim()
       if (!trimmed) return
+
+      const auditReject = (reason: string) => {
+        const correlationId = meta.deliveryId ?? newAuditCorrelationId()
+        void appendAuditLog({
+          event: 'finished',
+          correlationId,
+          source: 'channel',
+          command: trimmed,
+          channel: meta.channel,
+          sessionKey: meta.sessionKey,
+          deliveryId: meta.deliveryId,
+          outcome: 'rejected',
+          reason,
+        })
+      }
+
+      // /confirm and /cancel are confirmation responses, not new write pipelines.
+      // They must bypass file-lock acquisition and go straight to processCommand.
+      if (/^\/(confirm|cancel)\b/i.test(trimmed)) {
+        pushUser(`[Channel] ${trimmed}`)
+        processCommand(trimmed, { origin: 'remote' })
+        return
+      }
+
+      // Resolve the target file early so we can check the file-level lock.
+      let resolvedFile = activeFile
+      if (meta.targetFile) {
+        const target = meta.targetFile.toLowerCase()
+        const matched = useFileStore
+          .getState()
+          .files.find((f) => f.name.toLowerCase() === target)
+        if (matched) {
+          resolvedFile = matched
+        } else {
+          auditReject('target_file_not_open')
+          if (meta.sessionKey) {
+            sendCommandStatus(
+              meta.sessionKey,
+              `[ClawEditor] ${trimmed} → rejected: 文件「${meta.targetFile}」未在编辑器中打开`
+            )
+          }
+          return
+        }
+      }
+
+      const targetFileId = resolvedFile?.id
+
+      // File-level write lock: reject if the same file already has an in-flight pipeline.
+      if (targetFileId) {
+        const acquired = acquireFileLock({
+          fileId: targetFileId,
+          sessionKey: meta.sessionKey,
+          command: trimmed,
+          startMs: Date.now(),
+        })
+        if (!acquired) {
+          auditReject('file_busy')
+          pushSystem(ansiMsg(`\x1b[33m[Channel] 命令已拒绝：文件「${resolvedFile?.name ?? targetFileId}」正在处理另一条命令。\x1b[0m`))
+          if (meta.sessionKey) {
+            sendCommandStatus(
+              meta.sessionKey,
+              `[ClawEditor] ${trimmed} → rejected: 文件「${resolvedFile?.name ?? targetFileId}」正在处理另一条命令，请等待完成后再试`
+            )
+          }
+          return
+        }
+      }
+
+      const correlationId = meta.deliveryId ?? newAuditCorrelationId()
+      const startedAt = Date.now()
+      const auditCtx: CommandAuditContext = {
+        correlationId,
+        source: 'channel',
+        command: trimmed,
+        startMs: startedAt,
+        channel: meta.channel,
+        sessionKey: meta.sessionKey,
+        deliveryId: meta.deliveryId,
+        fileId: resolvedFile?.id,
+        fileName: resolvedFile?.name,
+      }
+      inFlightAuditRef.current = auditCtx
+      void appendAuditLog({
+        event: 'accepted',
+        correlationId,
+        source: 'channel',
+        command: trimmed,
+        channel: meta.channel,
+        sessionKey: meta.sessionKey,
+        deliveryId: meta.deliveryId,
+        file: resolvedFile?.name,
+        fileId: resolvedFile?.id,
+      })
+
+      // Record meta for status callbacks (completed/failed sent from proposal handlers).
+      pendingRemoteCmdRef.current = {
+        sessionKey: meta.sessionKey,
+        channel: meta.channel,
+        command: trimmed,
+        startMs: startedAt,
+        lockedFileId: targetFileId,
+        correlationId,
+      }
+
+      // Switch to the target tab if --file was specified.
+      if (meta.targetFile && resolvedFile && resolvedFile.id !== activeFile?.id) {
+        useFileStore.getState().setActiveFileId(resolvedFile.id)
+      }
+
       pushUser(`[Channel] ${trimmed}`)
-      processCommand(trimmed)
+
+      // Send 'accepted' with current file context so Channel user knows what will be edited.
+      if (meta.sessionKey) {
+        const currentFile = resolvedFile?.name ?? activeFile?.name ?? '（无打开文件）'
+        const openFiles = useFileStore.getState().files
+        const fileListPart =
+          openFiles.length > 1
+            ? `\n当前打开的文件：${openFiles.map((f) => (f.name === currentFile ? `**${f.name}**（当前）` : f.name)).join(' · ')}\n如需指定其他文件，可在命令中加 --file <文件名>，例如：${trimmed.replace(/^(\/\w+)/, `$1 --file utils.ts`)}`
+            : ''
+        sendCommandStatus(
+          meta.sessionKey,
+          `[ClawEditor] ${trimmed} → accepted（操作文件：${currentFile}）${fileListPart}`
+        )
+      }
+      processCommand(trimmed, { origin: 'remote' })
     })
     return () => setRemoteCommandExecutor(null)
-  }, [pushUser, processCommand])
+  }, [pushUser, processCommand, sendCommandStatus, pendingProposal, activeFile])
 
   useEffect(() => {
     if (!lastError) return
     pushSystem(ansiMsg(`\x1b[31m${lastError}\x1b[0m`))
-  }, [lastError, pushSystem])
+    // If an error occurred while a remote command was in-flight (e.g. AI intent error),
+    // the proposal may never arrive, so the file lock would never be released via clearProposal.
+    // Release it here as a safety net.
+    const remoteMeta = pendingRemoteCmdRef.current
+    const noProposal = !useAgentStore.getState().pendingProposal
+    if (remoteMeta?.lockedFileId && noProposal) {
+      releaseFileLock(remoteMeta.lockedFileId)
+      if (remoteMeta.sessionKey) {
+        sendCommandStatus(
+          remoteMeta.sessionKey,
+          `[ClawEditor] ${remoteMeta.command} → failed: ${lastError}`
+        )
+      }
+      pendingRemoteCmdRef.current = null
+      finishOpenCommandAudit('failed', lastError)
+    } else if (noProposal && inFlightAuditRef.current) {
+      finishOpenCommandAudit('failed', lastError)
+    }
+  }, [lastError, pushSystem, sendCommandStatus, finishOpenCommandAudit])
 
   useEffect(() => {
     const el = chatLogRef.current
@@ -1237,6 +1576,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     if (result.kind === 'edit') {
       if (result.newText === baseText) {
         pushSystem(ansiMsg('\x1b[33m意图未改变文档\x1b[0m'))
+        finishOpenCommandAudit('completed', 'no_document_change')
       } else {
         const intentSel = selectionProposalFieldsFromReplaceSelectionIntent(
           payload.intent,
@@ -1250,6 +1590,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           fileId: payload.fileId,
           filePath: payload.filePath,
           fileName: payload.fileName,
+          remoteSessionKey: pendingRemoteCmdRef.current?.sessionKey,
           ...(intentSel ?? {}),
           ...(payload.skillId === 'aicorrect'
             ? { proposalDiffVariant: 'side_by_side_interactive' as const }
@@ -1275,6 +1616,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     setPendingProposal,
     selection,
     handleApplyIntentResult,
+    finishOpenCommandAudit,
   ])
 
   const applyProposalAll = useCallback(() => {
@@ -1289,6 +1631,17 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     markModified(targetId, true)
     clearProposal()
     pushSystem(ansiMsg('\x1b[32m修改已应用\x1b[0m'))
+    // Send 'completed' status back to the Channel that issued the remote command.
+    const remoteMeta = pendingRemoteCmdRef.current
+    if (remoteMeta?.sessionKey) {
+      const durationMs = Date.now() - remoteMeta.startMs
+      sendCommandStatus(
+        remoteMeta.sessionKey,
+        `[ClawEditor] ${remoteMeta.command} → completed (${durationMs}ms)`
+      )
+      pendingRemoteCmdRef.current = null
+    }
+    finishOpenCommandAudit('completed')
   }, [
     pendingProposal,
     proposalTargetFileByPath?.id,
@@ -1298,6 +1651,8 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     markModified,
     clearProposal,
     pushSystem,
+    sendCommandStatus,
+    finishOpenCommandAudit,
   ])
 
   const applyProposalSelected = useCallback(() => {
@@ -1340,6 +1695,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     markModified(targetId, true)
     clearProposal()
     pushSystem(ansiMsg('\x1b[32m已应用所选修改\x1b[0m'))
+    finishOpenCommandAudit('completed')
   }, [
     pendingProposal,
     proposalDiff,
@@ -1352,12 +1708,58 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     markModified,
     clearProposal,
     pushSystem,
+    finishOpenCommandAudit,
   ])
 
   const interactiveSideBySideProposal = Boolean(
     pendingProposal?.proposalDiffVariant === 'side_by_side_interactive' &&
       proposalDiff?.sideBySide?.lineAligned
   )
+
+  /** Wraps clearProposal to also send a 'failed' status back to the Channel. */
+  const handleRejectProposal = useCallback(() => {
+    const remoteMeta = pendingRemoteCmdRef.current
+    if (remoteMeta?.sessionKey) {
+      const durationMs = Date.now() - remoteMeta.startMs
+      sendCommandStatus(
+        remoteMeta.sessionKey,
+        `[ClawEditor] ${remoteMeta.command} → failed: user rejected the proposal (${durationMs}ms)`
+      )
+      pendingRemoteCmdRef.current = null
+    }
+    clearProposal()
+    finishOpenCommandAudit('failed', 'user_rejected_proposal')
+  }, [clearProposal, sendCommandStatus, finishOpenCommandAudit])
+
+  // When a remote proposal arrives, send the diff to Channel for confirmation.
+  useEffect(() => {
+    const proposal = pendingProposal
+    if (!proposal?.remoteSessionKey) return
+    const sessionKey = proposal.remoteSessionKey
+    const fileName = effectiveProposalTargetFile?.name ?? 'unknown'
+    const before = proposalFileText
+    const after = proposal.newText
+    const command = pendingRemoteCmdRef.current?.command ?? ''
+
+    if (before === after) {
+      // No actual change — notify and clear immediately.
+      sendCommandStatus(sessionKey, `[ClawEditor] ${command} → 命令未产生修改`)
+      clearProposal()
+      finishOpenCommandAudit('completed', 'no_document_change')
+      return
+    }
+
+    const diffText = generateUnifiedDiff(before, after, fileName)
+    const msg = [
+      `[ClawEditor] ${command} → diff preview (${fileName}):`,
+      '```diff',
+      diffText,
+      '```',
+      '回复 /confirm 应用修改，/cancel 取消。',
+    ].join('\n')
+    sendCommandStatus(sessionKey, msg)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingProposal?.remoteSessionKey])
 
   const handleConnect = () => {
     if (connection === 'open') {
@@ -1476,7 +1878,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         />
       </div>
 
-      {pendingProposal && effectiveProposalTargetFile ? (
+      {pendingProposal && effectiveProposalTargetFile && !pendingProposal.remoteSessionKey ? (
         <div className="agent-proposal-overlay" role="dialog" aria-modal="true">
           <div className="agent-proposal-card">
             <div className="agent-proposal-title">
@@ -1519,7 +1921,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               />
             </div>
             <div className="agent-proposal-buttons">
-              <button type="button" className="agent-btn" onClick={clearProposal}>
+              <button type="button" className="agent-btn" onClick={handleRejectProposal}>
                 取消
               </button>
               {interactiveSideBySideProposal ? (

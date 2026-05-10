@@ -10,6 +10,13 @@ const OPENCLAW_EDIT_TIMEOUT_MS = 10_000
 const OPENCLAW_LOCAL_SKILL_TIMEOUT_MS = 120_000
 const openclawEditTimeouts = new Map<string, number>()
 
+/** Monotonic suffix so message ids stay unique when multiple append in the same ms. */
+let agentMessageSeq = 0
+function nextAgentMessageId(prefix: string): string {
+  agentMessageSeq += 1
+  return `${prefix}-${Date.now()}-${agentMessageSeq}`
+}
+
 /** Per-request context for local skill flows — selection diff metadata for onProposal. */
 const pendingLocalSkillContext = new Map<
   string,
@@ -57,6 +64,11 @@ export interface PendingProposal {
   selectionTo?: number
   /** When set, proposal dialog uses interactive side-by-side diff (e.g. /aicorrect). */
   proposalDiffVariant?: 'side_by_side_interactive'
+  /**
+   * When set, this proposal originated from a remote Channel command.
+   * The diff is sent to this session key for confirmation; the editor popup is suppressed.
+   */
+  remoteSessionKey?: string
 }
 
 export interface IncomingParsedIntent {
@@ -102,6 +114,46 @@ function loadDefaultGatewayPassword(): string {
 }
 
 let wsChannel: OpenClawWsChannel | null = null
+
+/** Tracks the sessionKey of the most recent remote command for lease-lost notifications. */
+let lastRemoteSessionKey: string | null = null
+
+/**
+ * Set when a remote Channel command enters the executor; cleared when its proposal is resolved.
+ * Used by onProposal handler to tag proposals with their originating session.
+ */
+let currentRemoteSessionKey: string | null = null
+
+/**
+ * File-level write pipeline locks.
+ * Key: fileId (string). Value: metadata about the in-flight command holding the lock.
+ * A file may only have one active write pipeline at a time; a second command for the same
+ * file is rejected immediately at the executor entry point.
+ */
+export interface FilePipelineLock {
+  fileId: string
+  /** undefined = local command */
+  sessionKey?: string
+  command: string
+  startMs: number
+}
+const fileWriteLocks = new Map<string, FilePipelineLock>()
+
+export function acquireFileLock(lock: FilePipelineLock): boolean {
+  if (fileWriteLocks.has(lock.fileId)) return false
+  fileWriteLocks.set(lock.fileId, lock)
+  return true
+}
+
+export function releaseFileLock(fileId: string): void {
+  if (!fileWriteLocks.has(fileId)) {
+    if (typeof console !== 'undefined') {
+      console.warn(`[agentStore] releaseFileLock: no lock held for fileId="${fileId}" — possible double-release or missing acquire`)
+    }
+    return
+  }
+  fileWriteLocks.delete(fileId)
+}
 
 let requestCounter = 0
 function nextRequestId(): string {
@@ -164,6 +216,8 @@ interface AgentState {
   pushAssistant: (content: string) => void
   pushUser: (content: string) => void
   pushSystem: (content: string) => void
+  /** Send a plain-text status message back to a Channel session (best-effort). */
+  sendCommandStatus: (sessionKey: string, text: string) => void
 }
 
 function buildOpenClawHandlers(
@@ -225,7 +279,7 @@ function buildOpenClawHandlers(
                 clearEditTimeout(boundRequestId)
               }
               // Print raw JSON for debugging (command output window).
-              const debugId = `dbg-intent-${Date.now()}`
+              const debugId = nextAgentMessageId('dbg-intent')
               set((s) => ({
                 suppressAssistantFinalIntentJson: false,
                 streaming: '',
@@ -256,7 +310,7 @@ function buildOpenClawHandlers(
         }
       }
 
-      const mid = `m-${Date.now()}`
+      const mid = nextAgentMessageId('m')
       set((s) => ({
         messages: [...s.messages, { id: mid, role: 'assistant' as const, content: markdown }],
         streaming: '',
@@ -312,6 +366,7 @@ function buildOpenClawHandlers(
           ...(diffMode === 'selection' && ctx
             ? { selectionFrom: ctx.selFrom, selectionTo: ctx.selTo }
             : {}),
+          remoteSessionKey: currentRemoteSessionKey ?? undefined,
         },
       })
     },
@@ -332,11 +387,19 @@ function buildOpenClawHandlers(
     clearStreaming: () => set({ streaming: '' }),
     pushSystem: (content) =>
       set((s) => ({
-        messages: [...s.messages, { id: `s-${Date.now()}`, role: 'system' as const, content }],
+        messages: [...s.messages, { id: nextAgentMessageId('s'), role: 'system' as const, content }],
       })),
-    onRemoteCommand: (line) => {
-      const ran = runRemoteEditorCommand(line)
+    onRemoteCommand: (line, meta) => {
+      // Track session key for lease-lost notifications and proposal routing.
+      if (meta.sessionKey) {
+        lastRemoteSessionKey = meta.sessionKey
+        currentRemoteSessionKey = meta.sessionKey
+      } else {
+        currentRemoteSessionKey = null
+      }
+      const ran = runRemoteEditorCommand(line, meta)
       if (!ran) {
+        currentRemoteSessionKey = null
         get().pushSystem(
           '收到远程编辑器命令，但 Agent 面板未就绪。请打开主界面中的 Agent 面板后再从 Channel 发送命令。'
         )
@@ -348,6 +411,13 @@ function buildOpenClawHandlers(
       get().pushSystem(
         '远程编辑接收已失效（连接断开、租约过期或其他会话占用）。如需继续接收频道命令，请重新勾选「开启远程编辑」。'
       )
+      // Notify the last known Channel session that the lease is gone.
+      if (lastRemoteSessionKey && wsChannel) {
+        void wsChannel.sendCommandStatus(
+          lastRemoteSessionKey,
+          '[ClawEditor] 远程编辑租约已失效，后续命令将无法执行，请重新开启远程编辑。'
+        )
+      }
     },
   }
 }
@@ -590,21 +660,29 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
-  clearProposal: () => set({ pendingProposal: null }),
+  clearProposal: () => {
+    const pp = get().pendingProposal
+    if (pp?.fileId) releaseFileLock(pp.fileId)
+    currentRemoteSessionKey = null
+    set({ pendingProposal: null })
+  },
   setPendingProposal: (p) => set({ pendingProposal: p }),
 
   appendStreaming: (delta) => set((s) => ({ streaming: s.streaming + delta })),
   clearStreaming: () => set({ streaming: '' }),
   pushAssistant: (content) =>
     set((s) => ({
-      messages: [...s.messages, { id: `a-${Date.now()}`, role: 'assistant' as const, content }],
+      messages: [...s.messages, { id: nextAgentMessageId('a'), role: 'assistant' as const, content }],
     })),
   pushUser: (content) =>
     set((s) => ({
-      messages: [...s.messages, { id: `u-${Date.now()}`, role: 'user' as const, content }],
+      messages: [...s.messages, { id: nextAgentMessageId('u'), role: 'user' as const, content }],
     })),
   pushSystem: (content) =>
     set((s) => ({
-      messages: [...s.messages, { id: `s-${Date.now()}`, role: 'system' as const, content }],
+      messages: [...s.messages, { id: nextAgentMessageId('s'), role: 'system' as const, content }],
     })),
+  sendCommandStatus: (sessionKey, text) => {
+    if (wsChannel) void wsChannel.sendCommandStatus(sessionKey, text)
+  },
 }))
