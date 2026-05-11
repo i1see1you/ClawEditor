@@ -3,7 +3,7 @@
  * (`integrations/openclaw-gateway` OpenClaw plugin, id `claweditor-gateway`).
  */
 export const REMOTE_EDITOR_COMMAND_LINE_RE =
-  /^\/(edit|aiedit|aicorrect|aiimport|confirm|cancel)\b/i
+  /^\/(edit|aiedit|aicorrect|aiimport)\b/i
 
 export function isRemoteEditorCommandLine(line: string): boolean {
   const t = line.trim()
