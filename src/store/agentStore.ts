@@ -17,6 +17,49 @@ function nextAgentMessageId(prefix: string): string {
   return `${prefix}-${Date.now()}-${agentMessageSeq}`
 }
 
+/** Dim timestamp prefix for Agent output system lines (local wall clock). */
+function formatAgentSystemLogPrefix(): string {
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const ts = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  return `\x1b[90m[${ts}]\x1b[0m `
+}
+
+/** FIFO: store `send()` request ids so JSON/tool results bind to the correct in-flight turn when several overlap. */
+const skillIntentBindQueue: string[] = []
+
+function removeSkillIntentBindQueueEntry(requestId: string) {
+  const i = skillIntentBindQueue.indexOf(requestId)
+  if (i >= 0) skillIntentBindQueue.splice(i, 1)
+}
+
+/** Remote explain → JSON intent: FIFO meta captured in AgentPanel before gateway send (full-file hash). */
+export interface RemoteIntentPipelineMeta {
+  correlationId: string
+  sessionKey?: string
+  channel?: string
+  deliveryId?: string
+  pipelineStartMs: number
+  originalCommand?: string
+  /** Full-document djb2 hash at snapshot (before model). */
+  baseContentHash: number
+}
+
+const remoteIntentPipelineQueue: RemoteIntentPipelineMeta[] = []
+
+export function enqueueRemoteIntentPipeline(meta: RemoteIntentPipelineMeta) {
+  remoteIntentPipelineQueue.push(meta)
+}
+
+export function takeRemoteIntentPipeline(): RemoteIntentPipelineMeta | undefined {
+  return remoteIntentPipelineQueue.shift()
+}
+
+export function discardRemoteIntentPipelineByCorrelation(correlationId: string) {
+  const i = remoteIntentPipelineQueue.findIndex((m) => m.correlationId === correlationId)
+  if (i >= 0) remoteIntentPipelineQueue.splice(i, 1)
+}
+
 /** Per-request context for local skill flows — selection diff metadata for onProposal. */
 const pendingLocalSkillContext = new Map<
   string,
@@ -31,6 +74,8 @@ const pendingLocalSkillContext = new Map<
     fileName?: string
     /** Set for local `action: 'skill'` requests (e.g. bind intent UI to /aicorrect). */
     skillId?: string
+    /** When Channel-originated skill/explain shares this outbound id. */
+    pipelineMeta?: RemoteIntentPipelineMeta
   }
 >()
 
@@ -50,7 +95,22 @@ export interface AgentMessage {
 }
 
 export interface PendingProposal {
-  requestId?: string
+  /** Required. 'local-xxx' for editor commands, deliveryId for Channel commands. */
+  requestId: string
+  /** Channel deliveryId — used by /confirm <id> for precise matching. */
+  deliveryId?: string
+  /** Channel session key — for sendCommandStatus callbacks. */
+  sessionKey?: string
+  /** Channel id — for /confirm (no-arg) "most recent" lookup. */
+  channel?: string
+  /** Date.now() when proposal was created — TTL start + /confirm no-arg sort key. */
+  proposalCreatedAt: number
+  /** djb2 hash of file content when command was issued. Used for stale-check on apply. */
+  baseContentHash?: number
+  /** Original command string — used to re-run when stale check fails (editor side). */
+  originalCommand?: string
+  /** correlationId from the accepted audit row — carried to confirm/cancel audit rows. */
+  correlationId?: string
   newText: string
   title?: string
   summary?: string
@@ -69,6 +129,8 @@ export interface PendingProposal {
    * The diff is sent to this session key for confirmation; the editor popup is suppressed.
    */
   remoteSessionKey?: string
+  /** Channel pipeline start (accepted) for duration in status messages. */
+  remotePipelineStartMs?: number
 }
 
 export interface IncomingParsedIntent {
@@ -80,6 +142,8 @@ export interface IncomingParsedIntent {
   fileName?: string
   /** Present when intent was bound to a single in-flight local skill request. */
   skillId?: string
+  /** Dequeued with this JSON intent when explain path was remote-originated. */
+  remotePipeline?: RemoteIntentPipelineMeta
 }
 
 const WS_URL_KEY = 'openclaw.wsUrl'
@@ -118,42 +182,21 @@ let wsChannel: OpenClawWsChannel | null = null
 /** Tracks the sessionKey of the most recent remote command for lease-lost notifications. */
 let lastRemoteSessionKey: string | null = null
 
-/**
- * Set when a remote Channel command enters the executor; cleared when its proposal is resolved.
- * Used by onProposal handler to tag proposals with their originating session.
- */
-let currentRemoteSessionKey: string | null = null
-
-/**
- * File-level write pipeline locks.
- * Key: fileId (string). Value: metadata about the in-flight command holding the lock.
- * A file may only have one active write pipeline at a time; a second command for the same
- * file is rejected immediately at the executor entry point.
- */
-export interface FilePipelineLock {
-  fileId: string
-  /** undefined = local command */
-  sessionKey?: string
-  command: string
-  startMs: number
-}
-const fileWriteLocks = new Map<string, FilePipelineLock>()
-
-export function acquireFileLock(lock: FilePipelineLock): boolean {
-  if (fileWriteLocks.has(lock.fileId)) return false
-  fileWriteLocks.set(lock.fileId, lock)
-  return true
-}
-
-export function releaseFileLock(fileId: string): void {
-  if (!fileWriteLocks.has(fileId)) {
-    if (typeof console !== 'undefined') {
-      console.warn(`[agentStore] releaseFileLock: no lock held for fileId="${fileId}" — possible double-release or missing acquire`)
-    }
-    return
+/** djb2 hash — fast, dependency-free, sufficient for stale-content detection. */
+export function hashContent(text: string): number {
+  let h = 5381
+  for (let i = 0; i < text.length; i++) {
+    h = ((h << 5) + h) ^ text.charCodeAt(i)
+    h = h >>> 0
   }
-  fileWriteLocks.delete(fileId)
+  return h
 }
+
+/** TTL timers for pending proposals. Cleared when proposal is resolved. */
+const proposalTtlTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+const PROPOSAL_TTL_MS = 5 * 60 * 1000
+const PROPOSAL_MAX_COUNT = 10
 
 let requestCounter = 0
 function nextRequestId(): string {
@@ -178,7 +221,8 @@ interface AgentState {
   streaming: string
   /** When true, suppress assistant final JSON intent echo. */
   suppressAssistantFinalIntentJson: boolean
-  pendingProposal: PendingProposal | null
+  pendingProposals: Map<string, PendingProposal>
+  activeProposalId: string | null
   lastError: string | null
   incomingIntent: IncomingParsedIntent | null
   takeIncomingIntent: () => IncomingParsedIntent | null
@@ -193,6 +237,9 @@ interface AgentState {
     text: string
     cursorPos: number
     selection: { text: string; from: number; to: number } | null
+    /** When set, used for tool/JSON binding and optional Channel pipeline meta. */
+    requestId?: string
+    pipelineMeta?: RemoteIntentPipelineMeta
   }) => Promise<boolean>
   /** Local /edit failed: ask Gateway for JSON intent, apply with applyParsedIntent. */
   parseEditIntentFallback: (params: {
@@ -209,8 +256,12 @@ interface AgentState {
     cursorPos: number
     selection: { text: string; from: number; to: number } | null
   }) => Promise<{ version: number; intent: unknown }>
-  clearProposal: () => void
-  setPendingProposal: (p: PendingProposal | null) => void
+  clearProposal: (requestId: string) => void
+  clearAllProposals: () => void
+  /** Clear only Channel-originated proposals (deliveryId present); keep local ones. */
+  clearChannelProposals: () => void
+  setPendingProposal: (p: PendingProposal) => void
+  setActiveProposalId: (id: string | null) => void
   appendStreaming: (delta: string) => void
   clearStreaming: () => void
   pushAssistant: (content: string) => void
@@ -231,7 +282,10 @@ function buildOpenClawHandlers(
 ): OpenClawWsChannel['handlers'] {
   return {
     onOpen: () => set({ connection: 'open', lastError: null }),
-    onClose: () => set({ connection: 'idle' }),
+    onClose: () => {
+      get().clearChannelProposals()
+      set({ connection: 'idle' })
+    },
     onError: () => set({ connection: 'error', lastError: 'WebSocket 连接错误' }),
     onDelta: (delta) => {
       set((s) => ({ streaming: s.streaming + delta }))
@@ -262,14 +316,28 @@ function buildOpenClawHandlers(
                     : null)
             const version = typeof o.version === 'number' ? o.version : 1
             if (op) {
-              // If this came from a local skill (/aiedit, /aiimport), try to bind it to the
-              // single in-flight request to avoid applying the proposal to the wrong tab.
+              // Bind JSON intent to the correct in-flight skill/explain turn (FIFO when several overlap).
               let boundRequestId: string | undefined
               let boundFileId: string | undefined
               let boundFilePath: string | undefined
               let boundFileName: string | undefined
               let boundSkillId: string | undefined
-              if (pendingLocalSkillContext.size === 1) {
+              while (skillIntentBindQueue.length > 0 && !boundRequestId) {
+                const cand = skillIntentBindQueue[0]!
+                const ctxPeek = pendingLocalSkillContext.get(cand)
+                if (ctxPeek) {
+                  boundRequestId = skillIntentBindQueue.shift()!
+                  const ctx = pendingLocalSkillContext.get(boundRequestId)
+                  boundFileId = ctx?.fileId
+                  boundFilePath = ctx?.filePath
+                  boundFileName = ctx?.fileName
+                  boundSkillId = ctx?.skillId
+                  clearEditTimeout(boundRequestId)
+                } else {
+                  skillIntentBindQueue.shift()
+                }
+              }
+              if (!boundRequestId && pendingLocalSkillContext.size === 1) {
                 boundRequestId = pendingLocalSkillContext.keys().next().value as string
                 const ctx = pendingLocalSkillContext.get(boundRequestId)
                 boundFileId = ctx?.fileId
@@ -278,6 +346,7 @@ function buildOpenClawHandlers(
                 boundSkillId = ctx?.skillId
                 clearEditTimeout(boundRequestId)
               }
+              const remotePipeline = takeRemoteIntentPipeline()
               // Print raw JSON for debugging (command output window).
               const debugId = nextAgentMessageId('dbg-intent')
               set((s) => ({
@@ -299,6 +368,7 @@ function buildOpenClawHandlers(
                   filePath: boundFilePath,
                   fileName: boundFileName,
                   skillId: boundSkillId,
+                  remotePipeline,
                 },
               }))
               if (boundRequestId) pendingLocalSkillContext.delete(boundRequestId)
@@ -306,8 +376,15 @@ function buildOpenClawHandlers(
             }
           }
         } catch {
+          if (remoteIntentPipelineQueue.length > 0) {
+            remoteIntentPipelineQueue.shift()
+          }
           // ignore parse failures; fall through to normal output
         }
+      }
+
+      if (remoteIntentPipelineQueue.length > 0 && !t.trim().startsWith('{')) {
+        remoteIntentPipelineQueue.shift()
       }
 
       const mid = nextAgentMessageId('m')
@@ -327,6 +404,7 @@ function buildOpenClawHandlers(
             fileId?: string
             filePath?: string
             fileName?: string
+            pipelineMeta?: RemoteIntentPipelineMeta
           }
         | undefined
 
@@ -348,26 +426,36 @@ function buildOpenClawHandlers(
         return
       }
 
-      set({
-        pendingProposal: {
-          requestId,
-          newText: proposal.newText,
-          title: proposal.title ?? 'AI 编辑',
-          summary: proposal.summary,
-          fileId: ctx?.fileId,
-          // For tool diff proposals, proposal.summary is typically the path (basename or full).
-          filePath:
-            ctx?.filePath ??
-            (typeof proposal.summary === 'string' && proposal.summary.trim()
-              ? proposal.summary.trim()
-              : undefined),
-          fileName: ctx?.fileName,
-          diffMode,
-          ...(diffMode === 'selection' && ctx
-            ? { selectionFrom: ctx.selFrom, selectionTo: ctx.selTo }
-            : {}),
-          remoteSessionKey: currentRemoteSessionKey ?? undefined,
-        },
+      const baseContentHash =
+        ctx?.fileTextSnapshot !== undefined ? hashContent(ctx.fileTextSnapshot) : undefined
+
+      const pm = ctx?.pipelineMeta
+      get().setPendingProposal({
+        requestId: requestId ?? `proposal-${Date.now()}`,
+        newText: proposal.newText,
+        title: proposal.title ?? 'AI 编辑',
+        summary: proposal.summary,
+        fileId: ctx?.fileId,
+        // For tool diff proposals, proposal.summary is typically the path (basename or full).
+        filePath:
+          ctx?.filePath ??
+          (typeof proposal.summary === 'string' && proposal.summary.trim()
+            ? proposal.summary.trim()
+            : undefined),
+        fileName: ctx?.fileName,
+        diffMode,
+        ...(diffMode === 'selection' && ctx
+          ? { selectionFrom: ctx.selFrom, selectionTo: ctx.selTo }
+          : {}),
+        remoteSessionKey: pm?.sessionKey,
+        sessionKey: pm?.sessionKey,
+        channel: pm?.channel,
+        deliveryId: pm?.deliveryId,
+        correlationId: pm?.correlationId,
+        originalCommand: pm?.originalCommand,
+        remotePipelineStartMs: pm?.pipelineStartMs,
+        baseContentHash,
+        proposalCreatedAt: Date.now(),
       })
     },
     onParsedIntent: ({ requestId, version, intent }) => {
@@ -376,7 +464,10 @@ function buildOpenClawHandlers(
     },
     onIntentError: ({ requestId, code, message }) => {
       clearEditTimeout(requestId)
-      if (requestId) pendingLocalSkillContext.delete(requestId)
+      if (requestId) {
+        removeSkillIntentBindQueueEntry(requestId)
+        pendingLocalSkillContext.delete(requestId)
+      }
       if (pendingLocalSkillContext.size === 0) {
         /* noop */
       }
@@ -385,21 +476,13 @@ function buildOpenClawHandlers(
       get().pushSystem(`意图解析失败${codePart}${idPart}: ${message}`)
     },
     clearStreaming: () => set({ streaming: '' }),
-    pushSystem: (content) =>
-      set((s) => ({
-        messages: [...s.messages, { id: nextAgentMessageId('s'), role: 'system' as const, content }],
-      })),
+    pushSystem: (content) => get().pushSystem(content),
     onRemoteCommand: (line, meta) => {
-      // Track session key for lease-lost notifications and proposal routing.
       if (meta.sessionKey) {
         lastRemoteSessionKey = meta.sessionKey
-        currentRemoteSessionKey = meta.sessionKey
-      } else {
-        currentRemoteSessionKey = null
       }
       const ran = runRemoteEditorCommand(line, meta)
       if (!ran) {
-        currentRemoteSessionKey = null
         get().pushSystem(
           '收到远程编辑器命令，但 Agent 面板未就绪。请打开主界面中的 Agent 面板后再从 Channel 发送命令。'
         )
@@ -471,7 +554,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   messages: [],
   streaming: '',
   suppressAssistantFinalIntentJson: false,
-  pendingProposal: null,
+  pendingProposals: new Map(),
+  activeProposalId: null,
   lastError: null,
   incomingIntent: null,
   takeIncomingIntent: () => {
@@ -542,8 +626,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     text,
     cursorPos,
     selection,
+    requestId: requestIdParam,
+    pipelineMeta,
   }) => {
-    const id = nextRequestId()
+    const id = requestIdParam ?? nextRequestId()
     const c = wsChannel
     if (!c) {
       set({ lastError: '未连接，请先连接 OpenClaw Gateway' })
@@ -581,12 +667,15 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         filePath: file.path,
         fileName: file.name,
         skillId: skillId ?? undefined,
+        ...(pipelineMeta ? { pipelineMeta } : {}),
       })
+      skillIntentBindQueue.push(id)
       clearEditTimeout(id)
       const label = skillId ? `/${skillId}` : '/skill'
       const timer = window.setTimeout(() => {
         if (openclawEditTimeouts.get(id) === timer) {
           openclawEditTimeouts.delete(id)
+          removeSkillIntentBindQueueEntry(id)
           pendingLocalSkillContext.delete(id)
           get().pushSystem(
             `OpenClaw ${label} 超时（${OPENCLAW_LOCAL_SKILL_TIMEOUT_MS / 1000} 秒）：${instruction}`
@@ -602,7 +691,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         const def = getSkillDef(skillId)
         if (!def) throw new Error(`未知 skill: ${skillId}`)
         if (def.kind !== 'local_intent_four_op') {
-          await c.sendChatMessage({ instruction, file, text, cursorPos, selection })
+          await c.sendChatMessage({ instruction, file, text, cursorPos, selection, requestId: id })
           return true
         }
         const hasSel = Boolean(selection && selection.from !== selection.to)
@@ -616,11 +705,12 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         }
         await c.sendLocalSkillMessage(skillId, shared)
       } else {
-        await c.sendChatMessage({ instruction, file, text, cursorPos, selection })
+        await c.sendChatMessage({ instruction, file, text, cursorPos, selection, requestId: id })
       }
     } catch (e) {
       clearEditTimeout(id)
       if (localSkill) {
+        removeSkillIntentBindQueueEntry(id)
         pendingLocalSkillContext.delete(id)
       }
       const msg = e instanceof Error ? e.message : String(e)
@@ -660,13 +750,89 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
-  clearProposal: () => {
-    const pp = get().pendingProposal
-    if (pp?.fileId) releaseFileLock(pp.fileId)
-    currentRemoteSessionKey = null
-    set({ pendingProposal: null })
+  clearProposal: (requestId: string) => {
+    // Clear TTL timer
+    const t = proposalTtlTimers.get(requestId)
+    if (t !== undefined) { clearTimeout(t); proposalTtlTimers.delete(requestId) }
+    set((s) => {
+      const next = new Map(s.pendingProposals)
+      next.delete(requestId)
+      // Advance activeProposalId to the earliest remaining proposal
+      let nextActiveId: string | null = s.activeProposalId
+      if (s.activeProposalId === requestId) {
+        nextActiveId = null
+        let earliest = Infinity
+        for (const [id, p] of next) {
+          if (p.proposalCreatedAt < earliest) { earliest = p.proposalCreatedAt; nextActiveId = id }
+        }
+      }
+      return { pendingProposals: next, activeProposalId: nextActiveId }
+    })
   },
-  setPendingProposal: (p) => set({ pendingProposal: p }),
+
+  clearAllProposals: () => {
+    for (const [id, t] of proposalTtlTimers) { clearTimeout(t); proposalTtlTimers.delete(id) }
+    set({ pendingProposals: new Map(), activeProposalId: null })
+  },
+
+  clearChannelProposals: () => {
+    set((s) => {
+      const next = new Map(s.pendingProposals)
+      for (const [id, p] of next) {
+        if (p.deliveryId !== undefined) {
+          const t = proposalTtlTimers.get(id)
+          if (t !== undefined) { clearTimeout(t); proposalTtlTimers.delete(id) }
+          next.delete(id)
+        }
+      }
+      let nextActiveId = s.activeProposalId
+      if (nextActiveId && !next.has(nextActiveId)) {
+        nextActiveId = null
+        let earliest = Infinity
+        for (const [id, p] of next) {
+          if (p.proposalCreatedAt < earliest) { earliest = p.proposalCreatedAt; nextActiveId = id }
+        }
+      }
+      return { pendingProposals: next, activeProposalId: nextActiveId }
+    })
+  },
+
+  setPendingProposal: (p: PendingProposal) => {
+    const state = get()
+    if (state.pendingProposals.size >= PROPOSAL_MAX_COUNT) {
+      // Notify Channel if applicable
+      if (p.sessionKey && wsChannel) {
+        void wsChannel.sendCommandStatus(
+          p.sessionKey,
+          '[ClawEditor] 待确认提案过多，请先处理现有提案后再发送命令'
+        )
+      }
+      state.pushSystem('待确认提案已达上限（10 条），请先处理现有提案。')
+      return
+    }
+    // Register TTL timer
+    const ttlTimer = setTimeout(() => {
+      proposalTtlTimers.delete(p.requestId)
+      const current = get().pendingProposals.get(p.requestId)
+      if (!current) return
+      if (current.sessionKey && wsChannel) {
+        void wsChannel.sendCommandStatus(
+          current.sessionKey,
+          `[ClawEditor] ${current.originalCommand ?? ''} → 提案已过期（5 分钟未确认）`.trim()
+        )
+      }
+      get().clearProposal(p.requestId)
+    }, PROPOSAL_TTL_MS)
+    proposalTtlTimers.set(p.requestId, ttlTimer)
+    set((s) => {
+      const next = new Map(s.pendingProposals)
+      next.set(p.requestId, p)
+      const activeId = s.activeProposalId ?? p.requestId
+      return { pendingProposals: next, activeProposalId: activeId }
+    })
+  },
+
+  setActiveProposalId: (id: string | null) => set({ activeProposalId: id }),
 
   appendStreaming: (delta) => set((s) => ({ streaming: s.streaming + delta })),
   clearStreaming: () => set({ streaming: '' }),
@@ -680,7 +846,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     })),
   pushSystem: (content) =>
     set((s) => ({
-      messages: [...s.messages, { id: nextAgentMessageId('s'), role: 'system' as const, content }],
+      messages: [
+        ...s.messages,
+        {
+          id: nextAgentMessageId('s'),
+          role: 'system' as const,
+          content: formatAgentSystemLogPrefix() + content,
+        },
+      ],
     })),
   sendCommandStatus: (sessionKey, text) => {
     if (wsChannel) void wsChannel.sendCommandStatus(sessionKey, text)

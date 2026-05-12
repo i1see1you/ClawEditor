@@ -74,6 +74,8 @@ export class OpenClawWsChannel {
   private pendingDiffProposal: { path: string; newText: string } | null = null
   /** Local skill (/aiedit, /aiimport) should not use diff/tool proposals; JSON intent only. */
   private suppressToolDiffForLocalSkill = false
+  /** FIFO: correlate tool `diff` final events with the outbound `send()` request id. */
+  private intentBindRequestQueue: string[] = []
   /** Dedupe `claweditor.command` by `deliveryId` from Gateway (FIFO cap). */
   private deliveredRemoteCommandIds = new Set<string>()
   private url: string
@@ -583,7 +585,10 @@ export class OpenClawWsChannel {
     this.pendingDiffProposal = null
     if (!pending || !this.activeFilePath) return
     if (!this.pathsMatch(pending.path, this.activeFilePath)) return
+    const bindRequestId =
+      this.intentBindRequestQueue.length > 0 ? this.intentBindRequestQueue.shift() : undefined
     this.handlers.onProposal({
+      requestId: bindRequestId,
       proposal: {
         kind: 'replace_whole_document',
         newText: pending.newText,
@@ -602,7 +607,10 @@ export class OpenClawWsChannel {
       if (!path || typeof newText !== 'string' || !ap || !this.pathsMatch(path, ap)) return
       if (phase === 'final') {
         this.cancelPendingDiffProposal()
+        const bindRequestId =
+          this.intentBindRequestQueue.length > 0 ? this.intentBindRequestQueue.shift() : undefined
         this.handlers.onProposal({
+          requestId: bindRequestId,
           proposal: { kind: 'replace_whole_document', newText, title: 'diff', summary: path },
         })
       } else {
@@ -803,10 +811,14 @@ export class OpenClawWsChannel {
     /** Cursor position in the document (UTF-16 offset); typically selection.anchor. */
     cursorPos: number
     selection: { text: string; from: number; to: number } | null
+    /** Matches agentStore `send` request id for tool-diff binding. */
+    requestId?: string
   }): Promise<void> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('WebSocket 未连接')
     }
+
+    if (params.requestId) this.intentBindRequestQueue.push(params.requestId)
 
     this.activeFilePath = params.file.path
     this.turnBuffer = ''
@@ -831,7 +843,8 @@ export class OpenClawWsChannel {
     cursorPos: number
     selection: { text: string; from: number; to: number } | null
     mode: 'full' | 'selection'
-  }): Promise<void> {
+  }
+  ): Promise<void> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('WebSocket 未连接')
     }

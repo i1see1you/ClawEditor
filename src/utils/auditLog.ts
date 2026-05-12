@@ -12,6 +12,8 @@ export type AuditFinishedOutcome = 'completed' | 'failed' | 'rejected'
 export interface AuditLogAccepted {
   event: 'accepted'
   correlationId: string
+  /** Internal proposal requestId (local: 'local-xxx', remote: deliveryId). */
+  requestId?: string
   source: AuditCommandSource
   command: string
   channel?: string
@@ -24,6 +26,8 @@ export interface AuditLogAccepted {
 export interface AuditLogFinished {
   event: 'finished'
   correlationId: string
+  /** Internal proposal requestId (local: 'local-xxx', remote: deliveryId). */
+  requestId?: string
   source: AuditCommandSource
   command: string
   channel?: string
