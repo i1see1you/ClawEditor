@@ -5,7 +5,7 @@
 import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry'
 
 /** Keep in sync with ClawEditor `src/openclaw/remoteEditorCommand.ts` */
-const EDITOR_COMMAND_RE = /^\/(edit|aiedit|aicorrect|aiimport)\b/i
+const EDITOR_COMMAND_RE = /^\/(edit|aiedit|aicorrect|aiimport|confirm|cancel)\b/i
 
 const FALLBACK_CTX_SYMBOL = Symbol.for('openclaw.fallbackGatewayContextState')
 
@@ -77,11 +77,19 @@ function shouldHandleForConfig(event, ctx, cfg) {
 }
 
 function buildPayload(line, event, ctx) {
+  // Extract optional --file <name> parameter and strip it from the command line.
+  let targetFile
+  const fileArgMatch = line.match(/\s--file\s+(\S+)/)
+  if (fileArgMatch) {
+    targetFile = fileArgMatch[1]
+    line = line.replace(fileArgMatch[0], '').replace(/\s+/, ' ').trim()
+  }
   return {
     schema: 'claweditor.command',
     version: 1,
     deliveryId: newDeliveryId(),
     line,
+    ...(targetFile ? { targetFile } : {}),
     source: {
       channel: String(event?.channel ?? ctx?.channelId ?? 'unknown'),
       sessionKey: event?.sessionKey ?? ctx?.sessionKey,
@@ -115,7 +123,7 @@ export default definePluginEntry({
 
     api.registerGatewayMethod(
       'claweditor-gateway.claimRemoteEdit',
-      ({ client, respond }) => {
+      ({ client, context, respond }) => {
         invalidateRemoteEditLease()
         const connId = typeof client?.connId === 'string' ? client.connId : ''
         if (!connId) {
@@ -128,8 +136,16 @@ export default definePluginEntry({
           return
         }
         if (remoteEditHolderConnId && remoteEditHolderConnId !== connId) {
-          respond(false, undefined, { code: 'REMOTE_EDIT_TAKEN', message: REMOTE_EDIT_TAKEN_MSG })
-          return
+          // Notify the previous holder that their lease has been taken over.
+          try {
+            context.broadcastToConnIds(
+              'claweditor.leaseEvicted',
+              { reason: 'taken_by_new_session' },
+              new Set([remoteEditHolderConnId])
+            )
+          } catch {
+            // Best-effort; proceed with takeover regardless.
+          }
         }
         remoteEditHolderConnId = connId
         remoteEditHolderRenewedAt = Date.now()

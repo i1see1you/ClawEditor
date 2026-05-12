@@ -53,7 +53,7 @@ export class OpenClawWsChannel {
     clearStreaming?: () => void
     pushSystem?: (content: string) => void
     /** Gateway plugin `claweditor.command` → same path as AgentPanel `processCommand`. */
-    onRemoteCommand?: (line: string, meta: { deliveryId?: string }) => void
+    onRemoteCommand?: (line: string, meta: { deliveryId?: string; sessionKey?: string; channel?: string; targetFile?: string }) => void
     /** Holder lost (renew rejected / lease) while remote edit was enabled. */
     onRemoteEditHoldLost?: () => void
   }
@@ -307,6 +307,23 @@ export class OpenClawWsChannel {
     }
   }
 
+  /**
+   * Send a plain-text status message back to the Channel session that issued a remote command.
+   * Best-effort: failures are silently swallowed so they never break the main flow.
+   */
+  async sendCommandStatus(sessionKey: string, text: string): Promise<void> {
+    if (!sessionKey) return
+    try {
+      await this.call('chat.send', {
+        sessionKey,
+        message: text,
+        idempotencyKey: this.newIdempotencyKey(),
+      })
+    } catch {
+      /* best-effort */
+    }
+  }
+
   private nextRpcId(): string {
     return `${Date.now()}-${++wsCounter}`
   }
@@ -369,6 +386,12 @@ export class OpenClawWsChannel {
       return
     }
 
+    if (event === 'claweditor.leaseEvicted') {
+      this.stopRemoteEditRenew()
+      this.handlers.onRemoteEditHoldLost?.()
+      return
+    }
+
     if (event === 'shutdown') {
       this.handlers.onClose(new CloseEvent('close'))
     }
@@ -414,7 +437,18 @@ export class OpenClawWsChannel {
       }
     }
 
-    this.handlers.onRemoteCommand(line, { deliveryId })
+    this.handlers.onRemoteCommand(line, {
+      deliveryId,
+      sessionKey:
+        payload.source && typeof payload.source === 'object'
+          ? ((payload.source as Record<string, unknown>).sessionKey as string | undefined)
+          : undefined,
+      channel:
+        payload.source && typeof payload.source === 'object'
+          ? ((payload.source as Record<string, unknown>).channel as string | undefined)
+          : undefined,
+      targetFile: typeof payload.targetFile === 'string' ? payload.targetFile : undefined,
+    })
   }
 
   private handleSessionMessage(payload: Record<string, unknown>): void {
