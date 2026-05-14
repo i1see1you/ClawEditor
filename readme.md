@@ -1,4 +1,15 @@
-ClawEditor 是一款基于 OpenClaw 与 Tauri 构建的 AI 驱动型轻量级跨平台文本编辑器。
+ClawEditor 是一款基于 OpenClaw 与 Tauri 构建的 AI 驱动型轻量级跨平台文本编辑器。所有的编辑操作都需要用户先确认diff，然后再应用修改，一个编辑命令就是一个skill，支持用户自定义skill。
+
+目前已实现的skill功能如下：
+/edit：本地编辑命令，用户直接输入编辑请求，利用大模型解析命令为标准的本地编辑命令
+/find：本地查找命令，用户输入查找请求，利用大模型解析命令为标准的本地查找命令
+/aiedit：利用大模型实现复杂的编辑命令，该命令会将文本内容传给openclaw底层的大模型，需要确保文件内容不明感或使用的大模型基本安全可控。
+/aiimport：利用大模型实现以markdown格式导入文件
+/aicorrect：利用大模型能力进行拼写纠错和标点符号检查
+
+TODO：
+openclaw的channel端远程编辑
+
 # 最终最简架构
 ## **本地桌面 GUI = 编辑器界面 + 内置 OpenClaw Channel 终端**
 也就是说：
