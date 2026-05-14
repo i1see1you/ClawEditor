@@ -37,7 +37,7 @@ Agent 面板采用聊天式 UI（非 xterm.js 终端），支持角色区分（u
 
 ```bash
 # 克隆仓库
-git clone https://github.com/<owner>/ClawEditor.git
+git clone https://github.com/i1see1you/ClawEditor.git
 cd ClawEditor
 
 # 安装前端依赖
