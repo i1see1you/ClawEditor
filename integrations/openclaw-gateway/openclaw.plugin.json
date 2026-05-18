@@ -1,7 +1,7 @@
 {
   "id": "claweditor-gateway",
   "name": "ClawEditor Gateway Bridge",
-  "description": "Intercepts channel slash commands (/edit, /aiedit, /aicorrect, /aiimport) and sends claweditor.command only to the ClawEditor connection that claimed remote edit (via Gateway RPC); skips default model dispatch when handled.",
+  "description": "Intercepts channel slash commands (/edit, /aiedit, /aicorrect, /aiimport) and forwards claw_editor.v1.request to the ClawEditor holder; delivers diff/commit via channel outbound (emitV1Event).",
   "version": "1.0.0",
   "configSchema": {
     "type": "object",

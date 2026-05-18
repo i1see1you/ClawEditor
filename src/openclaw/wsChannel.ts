@@ -10,6 +10,13 @@ import {
   GATEWAY_BRACKET_HEADER,
 } from './config/gatewayPromptLines'
 import { isRemoteEditorCommandLine } from './remoteEditorCommand'
+import {
+  isClawEditorV1CommitPayload,
+  isClawEditorV1RequestPayload,
+  parseClawEditorV1Context,
+  type ClawEditorV1OutboundEvent,
+} from './clawEditorV1'
+import { runV1Commit } from '../agent/remoteCommandBridge'
 
 let wsCounter = 0
 
@@ -52,8 +59,17 @@ export class OpenClawWsChannel {
     }) => void
     clearStreaming?: () => void
     pushSystem?: (content: string) => void
-    /** Gateway plugin `claweditor.command` → same path as AgentPanel `processCommand`. */
-    onRemoteCommand?: (line: string, meta: { deliveryId?: string; sessionKey?: string; channel?: string; targetFile?: string }) => void
+    /** Gateway plugin `claw_editor.v1.request` → AgentPanel `processCommand`. */
+    onRemoteCommand?: (
+      line: string,
+      meta: {
+        deliveryId?: string
+        sessionKey?: string
+        channel?: string
+        targetFile?: string
+        v1?: { requestId: string; context: import('./clawEditorV1').ClawEditorV1Context }
+      }
+    ) => void
     /** Holder lost (renew rejected / lease) while remote edit was enabled. */
     onRemoteEditHoldLost?: () => void
   }
@@ -74,6 +90,8 @@ export class OpenClawWsChannel {
   private pendingDiffProposal: { path: string; newText: string } | null = null
   /** Local skill (/aiedit, /aiimport) should not use diff/tool proposals; JSON intent only. */
   private suppressToolDiffForLocalSkill = false
+  /** Channel claw_editor.v1 — ignore gateway tool diffs; proposal comes from bound requestId. */
+  private suppressToolDiffForRemoteV1 = false
   /** FIFO: correlate tool `diff` final events with the outbound `send()` request id. */
   private intentBindRequestQueue: string[] = []
   /** Dedupe `claweditor.command` by `deliveryId` from Gateway (FIFO cap). */
@@ -182,7 +200,8 @@ export class OpenClawWsChannel {
     const clientId = 'gateway-client'
     const clientMode = 'ui'
     const role = 'operator'
-    const scopes = ['operator.read', 'operator.write']
+    /** Must match signed payload: gateway verifies `connectParams.scopes.join(",")` verbatim. */
+    const scopes = ['operator.admin']
     const platform = 'desktop'
 
     const signPayload = buildDeviceAuthPayloadV3({
@@ -223,7 +242,7 @@ export class OpenClawWsChannel {
         },
         role,
         scopes,
-        caps: ['claweditor.command.v1'],
+        caps: ['claweditor.v1'],
         commands: [],
         permissions: {},
         ...(useToken
@@ -326,6 +345,11 @@ export class OpenClawWsChannel {
     }
   }
 
+  /** Deliver claw_editor.v1 outbound event via gateway plugin (channel IM outbound). */
+  async emitV1Event(event: ClawEditorV1OutboundEvent): Promise<void> {
+    await this.call('claweditor-gateway.emitV1Event', { event })
+  }
+
   private nextRpcId(): string {
     return `${Date.now()}-${++wsCounter}`
   }
@@ -383,8 +407,13 @@ export class OpenClawWsChannel {
       return
     }
 
-    if (event === 'claweditor.command') {
-      this.handleClawEditorCommand(payload)
+    if (event === 'claw_editor.v1.request') {
+      this.handleV1Request(payload)
+      return
+    }
+
+    if (event === 'claw_editor.v1.commit') {
+      this.handleV1Commit(payload)
       return
     }
 
@@ -399,20 +428,14 @@ export class OpenClawWsChannel {
     }
   }
 
-  private handleClawEditorCommand(payload: Record<string, unknown>): void {
-    const ver = payload.version
-    if (ver !== undefined && ver !== 1) {
-      this.handlers.pushSystem?.(`[远程命令] 不支持的协议版本: ${String(ver)}`)
+  private handleV1Request(payload: Record<string, unknown>): void {
+    if (!isClawEditorV1RequestPayload(payload)) {
+      this.handlers.pushSystem?.('[远程命令] 无效的 claw_editor.v1.request')
       return
     }
 
-    const lineRaw = payload.line
-    if (typeof lineRaw !== 'string' || !lineRaw.trim()) {
-      this.handlers.pushSystem?.('[远程命令] 缺少有效 line')
-      return
-    }
-    const line = lineRaw.trim()
-    if (!isRemoteEditorCommandLine(line)) {
+    const line = payload.payload.full_text?.trim() || ''
+    if (!line || !isRemoteEditorCommandLine(line)) {
       this.handlers.pushSystem?.(
         `[远程命令] 已拒绝（非白名单前缀）: ${line.length > 80 ? `${line.slice(0, 80)}…` : line}`
       )
@@ -426,31 +449,32 @@ export class OpenClawWsChannel {
       return
     }
 
-    const deliveryId = typeof payload.deliveryId === 'string' ? payload.deliveryId : undefined
-    if (deliveryId) {
-      if (this.deliveredRemoteCommandIds.has(deliveryId)) {
-        return
-      }
-      this.deliveredRemoteCommandIds.add(deliveryId)
-      while (this.deliveredRemoteCommandIds.size > 200) {
-        const oldest = this.deliveredRemoteCommandIds.values().next().value as string | undefined
-        if (oldest === undefined) break
-        this.deliveredRemoteCommandIds.delete(oldest)
-      }
+    const context = parseClawEditorV1Context(payload.context)
+    if (!context) {
+      this.handlers.pushSystem?.('[远程命令] 缺少有效 context.channel_id')
+      return
     }
 
     this.handlers.onRemoteCommand(line, {
-      deliveryId,
-      sessionKey:
-        payload.source && typeof payload.source === 'object'
-          ? ((payload.source as Record<string, unknown>).sessionKey as string | undefined)
-          : undefined,
-      channel:
-        payload.source && typeof payload.source === 'object'
-          ? ((payload.source as Record<string, unknown>).channel as string | undefined)
-          : undefined,
-      targetFile: typeof payload.targetFile === 'string' ? payload.targetFile : undefined,
+      targetFile: payload.payload.target_file,
+      channel: context.channel_plugin,
+      v1: { requestId: payload.request_id, context },
     })
+  }
+
+  private handleV1Commit(payload: Record<string, unknown>): void {
+    if (!isClawEditorV1CommitPayload(payload)) {
+      this.handlers.pushSystem?.('[远程命令] 无效的 claw_editor.v1.commit')
+      return
+    }
+    const context = parseClawEditorV1Context(payload.context)
+    if (!context) return
+    const action = payload.payload.action
+    if (!runV1Commit({ request_id: payload.request_id, context, action })) {
+      this.handlers.pushSystem?.(
+        '[远程命令] 无法执行审批：Agent 面板未就绪。请打开 ClawEditor 后重试。'
+      )
+    }
   }
 
   private handleSessionMessage(payload: Record<string, unknown>): void {
@@ -556,7 +580,7 @@ export class OpenClawWsChannel {
     }
 
     if (status === 'update') {
-      if (this.suppressToolDiffForLocalSkill) return
+      if (this.suppressToolDiffForLocalSkill || this.suppressToolDiffForRemoteV1) return
       this.tryExtractDiff(payload, 'update')
       return
     }
@@ -566,7 +590,7 @@ export class OpenClawWsChannel {
     }
 
     if (status === 'result' || status === 'done') {
-      if (this.suppressToolDiffForLocalSkill) return
+      if (this.suppressToolDiffForLocalSkill || this.suppressToolDiffForRemoteV1) return
       this.tryExtractDiff(payload, 'final')
     }
   }
@@ -801,6 +825,17 @@ export class OpenClawWsChannel {
         throw e2
       }
     }
+  }
+
+  /** Bind the next tool diff to a v1 `request_id` and suppress unrelated tool diffs. */
+  prepareRemoteV1EditTurn(requestId: string): void {
+    this.cancelPendingDiffProposal()
+    this.intentBindRequestQueue = [requestId]
+    this.suppressToolDiffForRemoteV1 = true
+  }
+
+  endRemoteV1EditTurn(): void {
+    this.suppressToolDiffForRemoteV1 = false
   }
 
   async sendChatMessage(params: {

@@ -2,7 +2,8 @@ import { create } from 'zustand'
 import type { OpenClawAction } from '../openclaw/types'
 import { OpenClawWsChannel } from '../openclaw/wsChannel'
 import { getSkillDef } from '../skills/skillRegistry'
-import { runRemoteEditorCommand } from '../agent/remoteCommandBridge'
+import { clearV1Request, peekV1Request, runRemoteEditorCommand } from '../agent/remoteCommandBridge'
+import type { ClawEditorV1Context, ClawEditorV1OutboundEvent } from '../openclaw/clawEditorV1'
 
 export type AgentConnection = 'idle' | 'connecting' | 'open' | 'error'
 
@@ -43,6 +44,8 @@ export interface RemoteIntentPipelineMeta {
   originalCommand?: string
   /** Full-document djb2 hash at snapshot (before model). */
   baseContentHash: number
+  /** claw_editor.v1 — fallback when tool-diff `requestId` binding misses peek map. */
+  v1Context?: ClawEditorV1Context
 }
 
 const remoteIntentPipelineQueue: RemoteIntentPipelineMeta[] = []
@@ -129,6 +132,8 @@ export interface PendingProposal {
    * The diff is sent to this session key for confirmation; the editor popup is suppressed.
    */
   remoteSessionKey?: string
+  /** claw_editor.v1: emit diff/commit via gateway plugin outbound (no editor popup). */
+  remoteV1Context?: ClawEditorV1Context
   /** Channel pipeline start (accepted) for duration in status messages. */
   remotePipelineStartMs?: number
 }
@@ -269,6 +274,8 @@ interface AgentState {
   pushSystem: (content: string) => void
   /** Send a plain-text status message back to a Channel session (best-effort). */
   sendCommandStatus: (sessionKey: string, text: string) => void
+  /** claw_editor.v1 outbound → gateway plugin → channel IM. */
+  emitV1Event: (event: ClawEditorV1OutboundEvent) => void
 }
 
 function buildOpenClawHandlers(
@@ -430,6 +437,8 @@ function buildOpenClawHandlers(
         ctx?.fileTextSnapshot !== undefined ? hashContent(ctx.fileTextSnapshot) : undefined
 
       const pm = ctx?.pipelineMeta
+      const v1Peek = requestId ? peekV1Request(requestId) : undefined
+      const v1Context = v1Peek?.context ?? pm?.v1Context
       get().setPendingProposal({
         requestId: requestId ?? `proposal-${Date.now()}`,
         newText: proposal.newText,
@@ -452,11 +461,13 @@ function buildOpenClawHandlers(
         channel: pm?.channel,
         deliveryId: pm?.deliveryId,
         correlationId: pm?.correlationId,
-        originalCommand: pm?.originalCommand,
+        originalCommand: pm?.originalCommand ?? v1Peek?.originalCommand,
         remotePipelineStartMs: pm?.pipelineStartMs,
+        remoteV1Context: v1Context,
         baseContentHash,
         proposalCreatedAt: Date.now(),
       })
+      if (v1Context && wsChannel) wsChannel.endRemoteV1EditTurn()
     },
     onParsedIntent: ({ requestId, version, intent }) => {
       clearEditTimeout(requestId)
@@ -467,6 +478,7 @@ function buildOpenClawHandlers(
       if (requestId) {
         removeSkillIntentBindQueueEntry(requestId)
         pendingLocalSkillContext.delete(requestId)
+        if (peekV1Request(requestId) && wsChannel) wsChannel.endRemoteV1EditTurn()
       }
       if (pendingLocalSkillContext.size === 0) {
         /* noop */
@@ -685,6 +697,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       openclawEditTimeouts.set(id, timer)
     }
 
+    if (requestIdParam && peekV1Request(requestIdParam)) {
+      c.prepareRemoteV1EditTurn(requestIdParam)
+    }
+
     try {
       if (action === 'skill') {
         if (!skillId) throw new Error('缺少 skillId')
@@ -751,6 +767,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   },
 
   clearProposal: (requestId: string) => {
+    clearV1Request(requestId)
     // Clear TTL timer
     const t = proposalTtlTimers.get(requestId)
     if (t !== undefined) { clearTimeout(t); proposalTtlTimers.delete(requestId) }
@@ -779,7 +796,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set((s) => {
       const next = new Map(s.pendingProposals)
       for (const [id, p] of next) {
-        if (p.deliveryId !== undefined) {
+        if (p.deliveryId !== undefined || p.remoteV1Context !== undefined) {
           const t = proposalTtlTimers.get(id)
           if (t !== undefined) { clearTimeout(t); proposalTtlTimers.delete(id) }
           next.delete(id)
@@ -827,7 +844,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set((s) => {
       const next = new Map(s.pendingProposals)
       next.set(p.requestId, p)
-      const activeId = s.activeProposalId ?? p.requestId
+      // v1 Channel proposals: activate so emitV1 diff runs; never keep a stale local popup active.
+      const activeId = p.remoteV1Context ? p.requestId : (s.activeProposalId ?? p.requestId)
       return { pendingProposals: next, activeProposalId: activeId }
     })
   },
@@ -857,5 +875,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     })),
   sendCommandStatus: (sessionKey, text) => {
     if (wsChannel) void wsChannel.sendCommandStatus(sessionKey, text)
+  },
+
+  emitV1Event: (event) => {
+    if (wsChannel) void wsChannel.emitV1Event(event)
   },
 }))

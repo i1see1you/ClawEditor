@@ -1,6 +1,9 @@
 /**
- * Matches OpenClaw gateway `buildDeviceAuthPayloadV3` + scope normalization
+ * Matches OpenClaw gateway `buildDeviceAuthPayloadV3`
  * (see openclaw `src/gateway/device-auth.ts`, `device-metadata-normalization.ts`).
+ *
+ * Signature verification uses connect `scopes` as sent (joined with ","), not
+ * `normalizeDeviceAuthScopes` — signing must use the same array/order.
  */
 export function normalizeDeviceMetadataForAuth(value: string | undefined | null): string {
   const trimmed = typeof value === 'string' ? value.trim() : ''
@@ -35,7 +38,7 @@ export function buildDeviceAuthPayloadV3(params: {
   platform?: string | null
   deviceFamily?: string | null
 }): string {
-  const scopes = normalizeDeviceAuthScopes(params.scopes).join(',')
+  const scopes = params.scopes.join(',')
   const token = params.token ?? ''
   const platform = normalizeDeviceMetadataForAuth(params.platform)
   const deviceFamily = normalizeDeviceMetadataForAuth(params.deviceFamily)

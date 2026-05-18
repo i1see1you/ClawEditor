@@ -1,7 +1,7 @@
 {
   "name": "@claweditor/openclaw-gateway-bridge",
   "version": "1.0.0",
-  "description": "OpenClaw Gateway plugin: route channel /edit-style commands to ClawEditor via claweditor.command events",
+  "description": "OpenClaw Gateway plugin: claw_editor.v1 Channel remote edit bridge for ClawEditor",
   "type": "module",
   "license": "MIT",
   "engines": {

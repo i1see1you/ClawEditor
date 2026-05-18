@@ -32,7 +32,8 @@ import { getClaweditorConfigForSkill, validateClaweditorConfig } from '../skills
 import { runSkillCompletions } from '../skills/completionEngine'
 import { getSkillDef, getSkillHelpText } from '../skills/skillRegistry'
 import { getCommandHintText } from '../commands/registry'
-import { setRemoteCommandExecutor } from '../agent/remoteCommandBridge'
+import { peekV1Request, setRemoteCommandExecutor, setV1CommitExecutor } from '../agent/remoteCommandBridge'
+import type { ClawEditorV1Context } from '../openclaw/clawEditorV1'
 import {
   appendAuditLog,
   newAuditCorrelationId,
@@ -227,6 +228,8 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   const pushUser = useAgentStore((s) => s.pushUser)
   const pushSystem = useAgentStore((s) => s.pushSystem)
   const sendCommandStatus = useAgentStore((s) => s.sendCommandStatus)
+  const emitV1Event = useAgentStore((s) => s.emitV1Event)
+  const emittedV1DiffRef = useRef<string | null>(null)
 
   const selection = useEditorStore((s) => s.selection)
 
@@ -617,6 +620,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         correlationId?: string
         pipelineStartMs?: number
         originalCommand?: string
+        v1Context?: ClawEditorV1Context
       }
     ) => {
       switch (result.kind) {
@@ -638,13 +642,16 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               originalCommand: cmdOrig ?? remoteCtx?.originalCommand,
               correlationId: cmdCorrId ?? remoteCtx?.correlationId,
               remotePipelineStartMs: remoteCtx?.pipelineStartMs,
+              remoteV1Context: remoteCtx?.v1Context,
               proposalCreatedAt: Date.now(),
             })
-            pushSystem(
-              ansiMsg(
-                '\x1b[33m已生成修改提案：请在弹窗中确认 diff 后再点击「应用修改」。\x1b[0m'
+            if (!remoteCtx?.v1Context) {
+              pushSystem(
+                ansiMsg(
+                  '\x1b[33m已生成修改提案：请在弹窗中确认 diff 后再点击「应用修改」。\x1b[0m'
+                )
               )
-            )
+            }
           }
           break
         case 'goto': {
@@ -705,6 +712,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         targetFile?: string
         correlationId?: string
         pipelineStartMs?: number
+        v1?: { requestId: string; context: ClawEditorV1Context }
       }
     }) => {
       const origin = opts?.origin ?? 'local'
@@ -738,6 +746,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               correlationId: meta.correlationId,
               pipelineStartMs: meta.pipelineStartMs,
               originalCommand: trimmed,
+              v1Context: meta.v1?.context,
             }
           : undefined
 
@@ -797,6 +806,9 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           const findProposal = (): import('../store/agentStore').PendingProposal | null => {
             const proposals = useAgentStore.getState().pendingProposals
             if (argDeliveryId) {
+              if (argDeliveryId.startsWith('req_')) {
+                return proposals.get(argDeliveryId) ?? null
+              }
               for (const p of proposals.values()) {
                 if (p.deliveryId === argDeliveryId) return p
               }
@@ -919,7 +931,10 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
 
       const cmdRequestId =
         origin === 'remote'
-          ? meta?.correlationId ?? meta?.deliveryId ?? `remote-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+          ? meta?.v1?.requestId ??
+            meta?.correlationId ??
+            meta?.deliveryId ??
+            `remote-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
           : `local-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 
       const finish = (outcome: AuditFinishedOutcome, reason?: string) => {
@@ -1278,6 +1293,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                     pipelineStartMs: remoteSnap.pipelineStartMs ?? Date.now(),
                     originalCommand: trimmed,
                     baseContentHash: preSendFullHash,
+                    ...(remoteSnap.v1Context ? { v1Context: remoteSnap.v1Context } : {}),
                   }
                 : undefined
 
@@ -1342,6 +1358,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             sessionKey: remoteSnap?.sessionKey,
             channel: remoteSnap?.channel,
             deliveryId: origin === 'remote' ? remoteSnap?.deliveryId : undefined,
+            remoteV1Context: meta?.v1?.context,
             baseContentHash: hashContent(fileText),
             originalCommand: trimmed,
             correlationId: cmdCorrelationId,
@@ -1426,6 +1443,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               originalCommand: trimmed,
               correlationId: cmdCorrelationId,
               remotePipelineStartMs: remoteSnap?.pipelineStartMs,
+              remoteV1Context: remoteSnap?.v1Context,
               proposalCreatedAt: Date.now(),
               ...clipSelDiff,
             })
@@ -1511,14 +1529,17 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                   originalCommand: trimmed,
                   correlationId: cmdCorrelationId,
                   remotePipelineStartMs: remoteSnap?.pipelineStartMs,
+                  remoteV1Context: remoteSnap?.v1Context,
                   proposalCreatedAt: Date.now(),
                   ...(intentSel ?? {}),
                 })
-                pushSystem(
-                  ansiMsg(
-                    '\x1b[33m已生成修改提案：请在弹窗中确认 diff 后再点击「应用修改」。\x1b[0m'
+                if (!remoteSnap?.v1Context) {
+                  pushSystem(
+                    ansiMsg(
+                      '\x1b[33m已生成修改提案：请在弹窗中确认 diff 后再点击「应用修改」。\x1b[0m'
+                    )
                   )
-                )
+                }
               }
             } else {
               handleApplyIntentResult(r, undefined, undefined, undefined, undefined, remoteSnap ?? undefined)
@@ -1561,6 +1582,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                 pipelineStartMs: remoteSnap.pipelineStartMs ?? Date.now(),
                 originalCommand: trimmed,
                 baseContentHash: preHash,
+                ...(remoteSnap.v1Context ? { v1Context: remoteSnap.v1Context } : {}),
               }
             : undefined
         if (pm) enqueueRemoteIntentPipeline(pm)
@@ -1628,6 +1650,43 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       const trimmed = line.trim()
       if (!trimmed) return
 
+      if (meta.v1) {
+        let resolvedFile = activeFile
+        if (meta.targetFile) {
+          const target = meta.targetFile.toLowerCase()
+          const matched = useFileStore
+            .getState()
+            .files.find((f) => f.name.toLowerCase() === target)
+          if (!matched) {
+            void emitV1Event({
+              type: 'claw_editor.v1.commit_response',
+              request_id: meta.v1.requestId,
+              context: meta.v1.context,
+              payload: {
+                action: 'ignore',
+                ok: false,
+                message: `文件「${meta.targetFile}」未在编辑器中打开`,
+              },
+            })
+            return
+          }
+          resolvedFile = matched
+          if (resolvedFile.id !== activeFile?.id) {
+            useFileStore.getState().setActiveFileId(resolvedFile.id)
+          }
+        }
+        pushUser(`[Channel] ${trimmed}`)
+        processCommand(trimmed, {
+          origin: 'remote',
+          meta: {
+            v1: meta.v1,
+            targetFile: meta.targetFile,
+            correlationId: meta.v1.requestId,
+          },
+        })
+        return
+      }
+
       const auditReject = (reason: string) => {
         const correlationId = meta.deliveryId ?? newAuditCorrelationId()
         void appendAuditLog({
@@ -1643,7 +1702,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         })
       }
 
-      // /confirm and /cancel are confirmation responses, not new write pipelines.
       if (/^\/(confirm|cancel)\b/i.test(trimmed)) {
         pushUser(`[Channel] ${trimmed}`)
         processCommand(trimmed, {
@@ -1653,7 +1711,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         return
       }
 
-      // Resolve the target file early when --file is specified.
       let resolvedFile = activeFile
       if (meta.targetFile) {
         const target = meta.targetFile.toLowerCase()
@@ -1700,14 +1757,12 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         fileId: resolvedFile?.id,
       })
 
-      // Switch to the target tab if --file was specified.
       if (meta.targetFile && resolvedFile && resolvedFile.id !== activeFile?.id) {
         useFileStore.getState().setActiveFileId(resolvedFile.id)
       }
 
       pushUser(`[Channel] ${trimmed}`)
 
-      // Send 'accepted' with current file context so Channel user knows what will be edited.
       if (meta.sessionKey) {
         const currentFile = resolvedFile?.name ?? activeFile?.name ?? '（无打开文件）'
         const openFiles = useFileStore.getState().files
@@ -1733,7 +1788,71 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       })
     })
     return () => setRemoteCommandExecutor(null)
-  }, [pushUser, processCommand, sendCommandStatus, pendingProposal, activeFile])
+  }, [pushUser, processCommand, sendCommandStatus, emitV1Event, activeFile])
+
+  useEffect(() => {
+    setV1CommitExecutor(({ request_id, context, action }) => {
+      const proposals = useAgentStore.getState().pendingProposals
+      const proposal = proposals.get(request_id)
+      const respond = (ok: boolean, message?: string) => {
+        void emitV1Event({
+          type: 'claw_editor.v1.commit_response',
+          request_id,
+          context,
+          payload: { action, ok, ...(message ? { message } : {}) },
+        })
+      }
+
+      if (!proposal) {
+        respond(false, '未知或已过期的流水号')
+        return
+      }
+
+      if (action === 'ignore') {
+        clearProposal(request_id)
+        if (proposal.correlationId) {
+          finishChannelAudit(proposal.correlationId, 'failed', 'user_cancelled')
+        }
+        respond(true)
+        return
+      }
+
+      const targetId =
+        proposal.fileId ??
+        files.find((f) => f.path && proposal.filePath && f.path === proposal.filePath)?.id ??
+        activeFile?.id
+      if (!targetId) {
+        respond(false, '找不到目标文件')
+        return
+      }
+      const targetFile = useFileStore.getState().files.find((f) => f.id === targetId)
+      const currentContent = typeof targetFile?.content === 'string' ? targetFile.content : ''
+      if (
+        proposal.baseContentHash !== undefined &&
+        hashContent(currentContent) !== proposal.baseContentHash
+      ) {
+        clearProposal(request_id)
+        respond(false, '文件已被修改，提案基于旧版本，请重新发送命令')
+        return
+      }
+      updateContent(targetId, proposal.newText)
+      markModified(targetId, true)
+      clearProposal(request_id)
+      if (proposal.correlationId) {
+        finishChannelAudit(proposal.correlationId, 'completed')
+      }
+      respond(true)
+    })
+    return () => setV1CommitExecutor(null)
+  }, [
+    activeFile?.id,
+    files,
+    clearProposal,
+    emitV1Event,
+    finishChannelAudit,
+    updateContent,
+    markModified,
+  ])
 
   useEffect(() => {
     if (!lastError) return
@@ -1811,17 +1930,25 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           correlationId: payload.remotePipeline?.correlationId ?? inFlightAuditRef.current?.correlationId,
           remotePipelineStartMs: payload.remotePipeline?.pipelineStartMs,
           originalCommand: payload.remotePipeline?.originalCommand,
+          remoteV1Context:
+            (payload.requestId ? peekV1Request(payload.requestId)?.context : undefined) ??
+            payload.remotePipeline?.v1Context,
           proposalCreatedAt: Date.now(),
           ...(intentSel ?? {}),
           ...(payload.skillId === 'aicorrect'
             ? { proposalDiffVariant: 'side_by_side_interactive' as const }
             : {}),
         })
-        pushSystem(
-          ansiMsg(
-            '\x1b[33m已生成修改提案：请在弹窗中确认 diff 后再应用。\x1b[0m'
+        const v1Ctx =
+          (payload.requestId ? peekV1Request(payload.requestId)?.context : undefined) ??
+          payload.remotePipeline?.v1Context
+        if (!v1Ctx) {
+          pushSystem(
+            ansiMsg(
+              '\x1b[33m已生成修改提案：请在弹窗中确认 diff 后再应用。\x1b[0m'
+            )
           )
-        )
+        }
       }
     } else {
       handleApplyIntentResult(
@@ -2008,10 +2135,55 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     setStaleWarning(false)
   }, [pendingProposal, clearProposal, sendCommandStatus, finishOpenCommandAudit, finishChannelAudit])
 
-  // When a remote proposal arrives, send the diff to Channel for confirmation.
+  // claw_editor.v1: emit diff to Channel via gateway plugin outbound.
   useEffect(() => {
     const proposal = pendingProposal
-    if (!proposal?.remoteSessionKey) return
+    if (!proposal?.remoteV1Context) return
+    if (emittedV1DiffRef.current === proposal.requestId) return
+
+    const ctx = proposal.remoteV1Context
+    const fileName = effectiveProposalTargetFile?.name ?? 'unknown'
+    const before = proposalFileText
+    const after = proposal.newText
+
+    if (before === after) {
+      void emitV1Event({
+        type: 'claw_editor.v1.commit_response',
+        request_id: proposal.requestId,
+        context: ctx,
+        payload: {
+          action: 'ignore',
+          ok: true,
+          message: '命令未产生修改',
+        },
+      })
+      clearProposal(proposal.requestId)
+      if (proposal.correlationId) {
+        finishChannelAudit(proposal.correlationId, 'completed', 'no_document_change')
+      }
+      emittedV1DiffRef.current = proposal.requestId
+      return
+    }
+
+    const diffText = generateUnifiedDiff(before, after, fileName)
+    void emitV1Event({
+      type: 'claw_editor.v1.diff_response',
+      request_id: proposal.requestId,
+      context: ctx,
+      payload: {
+        summary: `修改建议 (${fileName})`,
+        diff_text: diffText,
+        file_name: fileName,
+      },
+    })
+    emittedV1DiffRef.current = proposal.requestId
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingProposal?.requestId, pendingProposal?.remoteV1Context, pendingProposal?.newText])
+
+  // Legacy remote (chat.send): session-key based diff — keep for non-v1 paths.
+  useEffect(() => {
+    const proposal = pendingProposal
+    if (!proposal?.remoteSessionKey || proposal.remoteV1Context) return
     const sessionKey = proposal.remoteSessionKey
     const fileName = effectiveProposalTargetFile?.name ?? 'unknown'
     const before = proposalFileText
@@ -2019,7 +2191,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     const command = proposal.originalCommand ?? ''
 
     if (before === after) {
-      // No actual change — notify and clear immediately.
       sendCommandStatus(sessionKey, `[ClawEditor] ${command} → 命令未产生修改`)
       clearProposal(proposal.requestId)
       if (proposal.correlationId) {
@@ -2040,7 +2211,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     ].join('\n')
     sendCommandStatus(sessionKey, msg)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingProposal?.remoteSessionKey])
+  }, [pendingProposal?.remoteSessionKey, pendingProposal?.remoteV1Context])
 
   const handleConnect = () => {
     if (connection === 'open') {
@@ -2159,7 +2330,10 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         />
       </div>
 
-      {pendingProposal && effectiveProposalTargetFile && !pendingProposal.remoteSessionKey ? (
+      {pendingProposal &&
+      effectiveProposalTargetFile &&
+      !pendingProposal.remoteSessionKey &&
+      !pendingProposal.remoteV1Context ? (
         <div className="agent-proposal-overlay" role="dialog" aria-modal="true">
           <div className="agent-proposal-card">
             <div className="agent-proposal-title">
