@@ -4,6 +4,7 @@ import { OpenClawWsChannel } from '../openclaw/wsChannel'
 import { getSkillDef } from '../skills/skillRegistry'
 import { clearV1Request, peekV1Request, runRemoteEditorCommand } from '../agent/remoteCommandBridge'
 import type { ClawEditorV1Context, ClawEditorV1OutboundEvent } from '../openclaw/clawEditorV1'
+import { clearV1DiffEmitted, tryEmitV1DiffForProposal } from '../openclaw/v1ProposalDiff'
 
 export type AgentConnection = 'idle' | 'connecting' | 'open' | 'error'
 
@@ -202,6 +203,28 @@ const proposalTtlTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 const PROPOSAL_TTL_MS = 5 * 60 * 1000
 const PROPOSAL_MAX_COUNT = 10
+
+/** Pick which proposal drives the local diff popup (prefer non-v1 entries). */
+function pickActiveProposalId(
+  proposals: Map<string, PendingProposal>,
+  opts?: { preferLocal?: boolean }
+): string | null {
+  if (proposals.size === 0) return null
+  const entries = [...proposals.entries()]
+  const pool = opts?.preferLocal
+    ? entries.filter(([, p]) => !p.remoteV1Context)
+  : entries
+  const list = pool.length > 0 ? pool : entries
+  let bestId = list[0]![0]
+  let earliest = list[0]![1].proposalCreatedAt
+  for (const [id, p] of list) {
+    if (p.proposalCreatedAt < earliest) {
+      earliest = p.proposalCreatedAt
+      bestId = id
+    }
+  }
+  return bestId
+}
 
 let requestCounter = 0
 function nextRequestId(): string {
@@ -768,6 +791,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   clearProposal: (requestId: string) => {
     clearV1Request(requestId)
+    clearV1DiffEmitted(requestId)
     // Clear TTL timer
     const t = proposalTtlTimers.get(requestId)
     if (t !== undefined) { clearTimeout(t); proposalTtlTimers.delete(requestId) }
@@ -777,11 +801,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       // Advance activeProposalId to the earliest remaining proposal
       let nextActiveId: string | null = s.activeProposalId
       if (s.activeProposalId === requestId) {
-        nextActiveId = null
-        let earliest = Infinity
-        for (const [id, p] of next) {
-          if (p.proposalCreatedAt < earliest) { earliest = p.proposalCreatedAt; nextActiveId = id }
-        }
+        nextActiveId = pickActiveProposalId(next, { preferLocal: true })
       }
       return { pendingProposals: next, activeProposalId: nextActiveId }
     })
@@ -844,10 +864,17 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set((s) => {
       const next = new Map(s.pendingProposals)
       next.set(p.requestId, p)
-      // v1 Channel proposals: activate so emitV1 diff runs; never keep a stale local popup active.
-      const activeId = p.remoteV1Context ? p.requestId : (s.activeProposalId ?? p.requestId)
+      // v1: keep active for local popup; emit diff by request_id (see tryEmitV1DiffForProposal).
+      const activeId = p.remoteV1Context ? s.activeProposalId : p.requestId
       return { pendingProposals: next, activeProposalId: activeId }
     })
+    const stored = get().pendingProposals.get(p.requestId)
+    if (stored?.remoteV1Context) {
+      tryEmitV1DiffForProposal(stored, {
+        emitV1Event: (event) => get().emitV1Event(event),
+        clearProposal: (id) => get().clearProposal(id),
+      })
+    }
   },
 
   setActiveProposalId: (id: string | null) => set({ activeProposalId: id }),

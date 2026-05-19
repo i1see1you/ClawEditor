@@ -187,16 +187,22 @@ function formatV1OutboundText(event) {
     )
   }
   if (type === 'claw_editor.v1.commit_response') {
-    const isApply = payload?.action === 'apply'
-    if (isApply) {
+    const action = payload?.action
+    const ok = payload?.ok === true
+    const detail = payload?.message?.trim()
+    if (!ok) {
+      const reason = detail || '操作未完成'
+      return `❌ 编辑器报告：${reason}\n流水号 \`${request_id}\` 未应用修改。`
+    }
+    if (action === 'apply') {
       return (
-        `✅ 编辑器报告：磁盘写入成功！\n流水号 \`${request_id}\` 的修改已提交到编辑器缓存。` +
-        (payload?.message ? `\n${payload.message}` : '')
+        `✅ 编辑器报告：修改已应用。\n流水号 \`${request_id}\` 的变更已写入编辑器。` +
+        (detail ? `\n${detail}` : '')
       )
     }
     return (
-      `🗑️ 编辑器报告：操作已取消。\n流水号 \`${request_id}\` 的临时修改已被取消。` +
-      (payload?.message ? `\n${payload.message}` : '')
+      `🗑️ 编辑器报告：操作已取消。\n流水号 \`${request_id}\` 的提案已忽略。` +
+      (detail ? `\n${detail}` : '')
     )
   }
   return payload?.summary ?? payload?.message ?? ''
@@ -469,10 +475,8 @@ export default definePluginEntry({
         api.logger.info?.(
           `[claweditor-gateway] v1.commit ${actionType} → ${targetRequestId}`
         )
-        return {
-          handled: true,
-          text: `🔄 正在向编辑器提交 [${actionType === 'apply' ? '采纳' : '忽略'}] 决策...`,
-        }
+        // No immediate Channel reply — result is delivered via commit_response outbound.
+        return { handled: true }
       }
 
       return undefined

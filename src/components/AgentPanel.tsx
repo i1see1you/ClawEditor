@@ -35,11 +35,16 @@ import { getCommandHintText } from '../commands/registry'
 import { peekV1Request, setRemoteCommandExecutor, setV1CommitExecutor } from '../agent/remoteCommandBridge'
 import type { ClawEditorV1Context } from '../openclaw/clawEditorV1'
 import {
+  findOpenFileByBasename,
+  isAgentEditableFile,
+  parseTargetFile,
+} from '../openclaw/parseTargetFile'
+import {
   appendAuditLog,
   newAuditCorrelationId,
   type AuditFinishedOutcome,
 } from '../utils/auditLog'
-import { createPatch } from 'diff'
+import { generateUnifiedDiff } from '../openclaw/unifiedDiff'
 
 /** In-flight slash / remote command audit row (paired accepted → finished). */
 type CommandAuditContext = {
@@ -84,18 +89,6 @@ function stripAnsi(s: string): string {
 
 function ansiMsg(msg: string): string {
   return stripAnsi(msg)
-}
-
-const REMOTE_DIFF_MAX_CHARS = 1800
-
-/** Generate a compact unified diff string for sending to Channel. */
-function generateUnifiedDiff(before: string, after: string, fileName: string): string {
-  const patch = createPatch(fileName, before, after, '', '', { context: 3 })
-  // createPatch output: line 0 = "Index: ...", line 1 = "===...", line 2 = "--- ...", line 3 = "+++ ..."
-  // Keep only the hunks (from line 4 onward).
-  const hunks = patch.split('\n').slice(4).join('\n').trim()
-  if (hunks.length <= REMOTE_DIFF_MAX_CHARS) return hunks
-  return hunks.slice(0, REMOTE_DIFF_MAX_CHARS) + '\n…（diff 过长，已截断，建议在编辑器查看完整内容）'
 }
 
 const MAX_SKILL_SCOPE_LINES = 1000
@@ -229,7 +222,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   const pushSystem = useAgentStore((s) => s.pushSystem)
   const sendCommandStatus = useAgentStore((s) => s.sendCommandStatus)
   const emitV1Event = useAgentStore((s) => s.emitV1Event)
-  const emittedV1DiffRef = useRef<string | null>(null)
 
   const selection = useEditorStore((s) => s.selection)
 
@@ -576,36 +568,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     return { kind: 'fallback_gateway', rest }
   }
 
-  const contextForSend = useMemo(() => {
-    if (!activeFile) return null
-    return {
-      file: {
-        id: activeFile.id,
-        name: activeFile.name,
-        language: activeFile.language,
-        path: activeFile.path,
-      },
-      text: fileText,
-      cursorPos: selection?.from ?? 0,
-      selection:
-        selection && selection.text.length > 0
-          ? { text: selection.text, from: selection.from, to: selection.to }
-          : null,
-    }
-  }, [activeFile, fileText, selection])
-
-  const contextForSkillSend = useMemo(() => {
-    if (!contextForSend) return null
-    if (contextForSend.selection?.text) {
-      return {
-        ...contextForSend,
-        // Skill input is scope text: when there's a selection, only send selection text.
-        text: contextForSend.selection.text,
-      }
-    }
-    return contextForSend
-  }, [contextForSend])
-
   const handleApplyIntentResult = useCallback(
     (
       result: ApplyIntentResult,
@@ -718,22 +680,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       const origin = opts?.origin ?? 'local'
       const meta = opts?.meta
 
-      if (!canUseAgent || !contextForSend) {
-        pushSystem(ansiMsg('\x1b[33m请打开文本文件以使用 Agent\x1b[0m'))
-        if (origin === 'local') {
-          const cid = newAuditCorrelationId()
-          void appendAuditLog({
-            event: 'finished',
-            correlationId: cid,
-            source: 'local',
-            command: line.trim(),
-            outcome: 'rejected',
-            reason: 'no_text_file_or_agent_disabled',
-          })
-        }
-        return
-      }
-
       const trimmed = line.trim()
       if (!trimmed) return
 
@@ -749,12 +695,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               v1Context: meta.v1?.context,
             }
           : undefined
-
-      const sel =
-        selection && selection.from !== selection.to
-          ? { from: selection.from, to: selection.to, text: selection.text }
-          : null
-      const cursorPos = selection?.from ?? 0
 
       const skillMatchEarly = trimmed.match(/^\/([a-zA-Z0-9_-]+)(?:\s+([\s\S]*))?$/)
       if (skillMatchEarly) {
@@ -927,6 +867,82 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         }
       }
 
+      const { line: commandLine, targetFile: parsedTargetFile } = parseTargetFile(trimmed)
+      const targetFileName = meta?.targetFile ?? parsedTargetFile
+      const openFiles = useFileStore.getState().files
+
+      let commandFile: FileTab | undefined
+      if (targetFileName) {
+        commandFile = findOpenFileByBasename(openFiles, targetFileName) as FileTab | undefined
+        if (!commandFile) {
+          const msg = `文件「${targetFileName}」未在编辑器中打开`
+          pushSystem(ansiMsg(`\x1b[31m${msg}\x1b[0m`))
+          if (origin === 'remote' && meta?.v1) {
+            void emitV1Event({
+              type: 'claw_editor.v1.commit_response',
+              request_id: meta.v1.requestId,
+              context: meta.v1.context,
+              payload: { action: 'ignore', ok: false, message: msg },
+            })
+          } else if (origin === 'local') {
+            void appendAuditLog({
+              event: 'finished',
+              correlationId: newAuditCorrelationId(),
+              source: 'local',
+              command: trimmed,
+              outcome: 'rejected',
+              reason: 'target_file_not_open',
+            })
+          }
+          return
+        }
+      } else {
+        commandFile = activeFile
+      }
+
+      if (!isAgentEditableFile(commandFile)) {
+        pushSystem(ansiMsg('\x1b[33m请打开文本文件以使用 Agent\x1b[0m'))
+        if (origin === 'local') {
+          void appendAuditLog({
+            event: 'finished',
+            correlationId: newAuditCorrelationId(),
+            source: 'local',
+            command: trimmed,
+            outcome: 'rejected',
+            reason: 'no_text_file_or_agent_disabled',
+          })
+        }
+        return
+      }
+
+      if (commandFile.id !== activeFile?.id) {
+        useFileStore.getState().setActiveFileId(commandFile.id)
+      }
+
+      const commandFileText = commandFile.content
+      const useActiveSelection = commandFile.id === activeFile?.id
+      const commandSel =
+        useActiveSelection && selection && selection.from !== selection.to
+          ? { from: selection.from, to: selection.to, text: selection.text }
+          : null
+      const commandCursorPos = useActiveSelection ? (selection?.from ?? 0) : 0
+
+      const commandContextForSend = {
+        file: {
+          id: commandFile.id,
+          name: commandFile.name,
+          language: commandFile.language,
+          path: commandFile.path,
+        },
+        text: commandFileText,
+        cursorPos: commandCursorPos,
+        selection: commandSel,
+      }
+
+      const commandContextForSkillSend = commandSel
+        ? { ...commandContextForSend, text: commandSel.text }
+        : commandContextForSend
+
       let auditSnap: CommandAuditContext | null = null
 
       const cmdRequestId =
@@ -955,8 +971,8 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           source: 'local',
           command: trimmed,
           startMs: Date.now(),
-          fileId: activeFile?.id,
-          fileName: activeFile?.name,
+          fileId: commandFile.id,
+          fileName: commandFile.name,
         }
         inFlightAuditRef.current = auditSnap
         void appendAuditLog({
@@ -965,24 +981,24 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           requestId: cmdRequestId,
           source: 'local',
           command: trimmed,
-          file: activeFile?.name,
-          fileId: activeFile?.id,
+          file: commandFile.name,
+          fileId: commandFile.id,
         })
       }
 
       const cmdCorrelationId = auditSnap?.correlationId ?? meta?.correlationId
 
-      const skillMatch = trimmed.match(/^\/([a-zA-Z0-9_-]+)(?:\s+([\s\S]*))?$/)
+      const skillMatch = commandLine.match(/^\/([a-zA-Z0-9_-]+)(?:\s+([\s\S]*))?$/)
       if (skillMatch) {
         const skillId = (skillMatch[1] ?? '').toLowerCase()
         const rest = (skillMatch[2] ?? '').trim()
 
         if (skillId === 'find') {
           const selScope =
-            sel && sel.from !== sel.to
-              ? { from: sel.from, to: sel.to }
+            commandSel && commandSel.from !== commandSel.to
+              ? { from: commandSel.from, to: commandSel.to }
               : null
-          const localFind = parseLocalFind(trimmed, selScope)
+          const localFind = parseLocalFind(commandLine, selScope)
           if (localFind.kind === 'help') {
             useAgentStore.setState({ lastError: null })
             pushSystem(localFind.text)
@@ -1042,13 +1058,13 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               try {
                 const { version, intent } = await parseFindIntentFallback({
                   freeform: `/find ${localFind.rest}`,
-                  file: contextForSend.file,
+                  file: commandContextForSend.file,
                   text: '',
-                  cursorPos: contextForSend.cursorPos,
+                  cursorPos: commandContextForSend.cursorPos,
                   selection: null,
                 })
                 pushSystem(formatIntentForLog(version, intent))
-                const r = applyParsedIntent(fileText, sel, version, intent)
+                const r = applyParsedIntent(commandFileText, commandSel, version, intent)
                 if (r.kind === 'edit') {
                   pushSystem(
                     ansiMsg(
@@ -1223,8 +1239,8 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               (cfgAll as any)?.requiresScopeText === false ? false : true
 
             let sendCtx = (requiresScopeText
-              ? (contextForSkillSend ?? contextForSend)
-              : ({ ...(contextForSend as any), text: '' } as any)) as any
+              ? commandContextForSkillSend
+              : ({ ...commandContextForSend, text: '' } as any)) as any
 
             // Guard against overlong context: truncate full-scope skill text when file exceeds line limit.
             // Keep behavior unchanged when there's a selection (selection scope already handled upstream).
@@ -1281,7 +1297,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             }
 
             const preSendFullHash = hashContent(
-              fullDocumentTextForHash(sendCtx.file?.id ?? activeFile?.id, activeFile, fileText)
+              fullDocumentTextForHash(commandFile.id, commandFile, commandFileText)
             )
             const pipelineMeta =
               remoteSnap && meta?.correlationId
@@ -1318,7 +1334,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         }
       }
 
-      const localResult = parseLocalEdit(fileText, trimmed, sel, cursorPos)
+      const localResult = parseLocalEdit(commandFileText, commandLine, commandSel, commandCursorPos)
       if (localResult.kind === 'help') {
         useAgentStore.setState({ lastError: null })
         pushSystem(localResult.text)
@@ -1333,7 +1349,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       }
       if (localResult.kind === 'edit') {
         useAgentStore.setState({ lastError: null })
-        if (localResult.newText === fileText) {
+        if (localResult.newText === commandFileText) {
           pushSystem(ansiMsg('\x1b[33m本地命令没有产生变化\x1b[0m'))
           finish('completed', 'no_document_change')
         } else {
@@ -1351,15 +1367,15 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             newText: localResult.newText,
             title: '本地命令',
             summary: localResult.summary,
-            fileId: activeFile?.id,
-            filePath: activeFile?.path,
-            fileName: activeFile?.name,
+            fileId: commandFile.id,
+            filePath: commandFile.path,
+            fileName: commandFile.name,
             remoteSessionKey: remoteSnap?.sessionKey,
             sessionKey: remoteSnap?.sessionKey,
             channel: remoteSnap?.channel,
             deliveryId: origin === 'remote' ? remoteSnap?.deliveryId : undefined,
             remoteV1Context: meta?.v1?.context,
-            baseContentHash: hashContent(fileText),
+            baseContentHash: hashContent(commandFileText),
             originalCommand: trimmed,
             correlationId: cmdCorrelationId,
             remotePipelineStartMs: remoteSnap?.pipelineStartMs,
@@ -1395,36 +1411,36 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             let newText: string
             let summary: string
             if (localResult.op === 'insert') {
-              newText = mergeRange(fileText, cursorPos, cursorPos, text)
+              newText = mergeRange(commandFileText, commandCursorPos, commandCursorPos, text)
               summary = `从剪贴板在光标处插入 ${text.length} 字符`
             } else if (localResult.op === 'append') {
-              newText = fileText + text
+              newText = commandFileText + text
               summary = `从剪贴板在文末追加 ${text.length} 字符`
             } else if (localResult.op === 'replace_file') {
               newText = text
               summary = `从剪贴板整篇替换（${text.length} 字符）`
             } else {
-              if (!sel) {
+              if (!commandSel) {
                 pushSystem(
                   ansiMsg('\x1b[31mreplace-selection 需要非空选区。\x1b[0m')
                 )
                 finishAuditCtx(snapClip, 'rejected', 'selection_required')
                 return
               }
-              newText = mergeRange(fileText, sel.from, sel.to, text)
+              newText = mergeRange(commandFileText, commandSel.from, commandSel.to, text)
               summary = `从剪贴板替换选区（${text.length} 字符）`
             }
-            if (newText === fileText) {
+            if (newText === commandFileText) {
               pushSystem(ansiMsg('\x1b[33m剪贴板为空，未修改文档。\x1b[0m'))
               finishAuditCtx(snapClip, 'completed', 'no_document_change')
               return
             }
             const clipSelDiff =
-              localResult.op === 'replace_selection' && sel
+              localResult.op === 'replace_selection' && commandSel
                 ? {
                     diffMode: 'selection' as const,
-                    selectionFrom: sel.from,
-                    selectionTo: sel.to,
+                    selectionFrom: commandSel.from,
+                    selectionTo: commandSel.to,
                   }
                 : {}
             setPendingProposal({
@@ -1432,14 +1448,14 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               newText,
               title: '本地命令',
               summary,
-              fileId: activeFile?.id,
-              filePath: activeFile?.path,
-              fileName: activeFile?.name,
+              fileId: commandFile.id,
+              filePath: commandFile.path,
+              fileName: commandFile.name,
               remoteSessionKey: remoteSnap?.sessionKey,
               sessionKey: remoteSnap?.sessionKey,
               channel: remoteSnap?.channel,
               deliveryId: origin === 'remote' ? remoteSnap?.deliveryId : undefined,
-              baseContentHash: hashContent(fileText),
+              baseContentHash: hashContent(commandFileText),
               originalCommand: trimmed,
               correlationId: cmdCorrelationId,
               remotePipelineStartMs: remoteSnap?.pipelineStartMs,
@@ -1480,7 +1496,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           pushSystem(
             ansiMsg('\x1b[33m本地解析失败，正在通过 OpenClaw 解析编辑意图…\x1b[0m')
           )
-          const preHash = hashContent(fullDocumentTextForHash(activeFile?.id, activeFile, fileText))
+          const preHash = hashContent(fullDocumentTextForHash(commandFile.id, commandFile, commandFileText))
           const pm =
             origin === 'remote' && remoteSnap && meta?.correlationId
               ? {
@@ -1491,41 +1507,42 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                   pipelineStartMs: remoteSnap.pipelineStartMs ?? Date.now(),
                   originalCommand: trimmed,
                   baseContentHash: preHash,
+                  ...(remoteSnap.v1Context ? { v1Context: remoteSnap.v1Context } : {}),
                 }
               : undefined
           try {
             const { version, intent } = await parseEditIntentFallback({
               freeform: localResult.rest,
-              file: contextForSend.file,
+              file: commandContextForSend.file,
               // Privacy: do not send full document text or selection to OpenClaw for /edit fallback.
               text: '',
-              cursorPos: contextForSend.cursorPos,
+              cursorPos: commandContextForSend.cursorPos,
               selection: null,
             })
             pushSystem(formatIntentForLog(version, intent))
-            const r = applyParsedIntent(fileText, sel, version, intent)
+            const r = applyParsedIntent(commandFileText, commandSel, version, intent)
             if (r.kind === 'edit') {
-              if (r.newText === fileText) {
+              if (r.newText === commandFileText) {
                 pushSystem(ansiMsg('\x1b[33m意图未改变文档\x1b[0m'))
                 finish('completed', 'no_document_change')
               } else {
                 const intentSel = selectionProposalFieldsFromReplaceSelectionIntent(
                   intent,
-                  fileText.length
+                  commandFileText.length
                 )
                 setPendingProposal({
                   requestId: cmdRequestId,
                   newText: r.newText,
                   title: r.title,
                   summary: r.summary,
-                  fileId: activeFile?.id,
-                  filePath: activeFile?.path,
-                  fileName: activeFile?.name,
+                  fileId: commandFile.id,
+                  filePath: commandFile.path,
+                  fileName: commandFile.name,
                   remoteSessionKey: remoteSnap?.sessionKey,
                   sessionKey: remoteSnap?.sessionKey,
                   channel: remoteSnap?.channel,
                   deliveryId: origin === 'remote' ? remoteSnap?.deliveryId : undefined,
-                  baseContentHash: pm ? pm.baseContentHash : hashContent(fileText),
+                  baseContentHash: pm ? pm.baseContentHash : hashContent(commandFileText),
                   originalCommand: trimmed,
                   correlationId: cmdCorrelationId,
                   remotePipelineStartMs: remoteSnap?.pipelineStartMs,
@@ -1553,7 +1570,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         return
       }
 
-      const { action, instruction } = classifyAction(trimmed)
+      const { action, instruction } = classifyAction(commandLine)
       if (!instruction) {
         finish('rejected', 'unknown_command')
         return
@@ -1571,7 +1588,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       }
 
       void (async () => {
-        const preHash = hashContent(fullDocumentTextForHash(activeFile?.id, activeFile, fileText))
+        const preHash = hashContent(fullDocumentTextForHash(commandFile.id, commandFile, commandFileText))
         const pm =
           origin === 'remote' && remoteSnap && meta?.correlationId
             ? {
@@ -1586,7 +1603,12 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               }
             : undefined
         if (pm) enqueueRemoteIntentPipeline(pm)
-        const ok = await send({ action, instruction, ...contextForSend, requestId: cmdRequestId })
+        const ok = await send({
+          action,
+          instruction,
+          ...commandContextForSend,
+          requestId: cmdRequestId,
+        })
         if (!ok) {
           pushSystem(
             ansiMsg(
@@ -1599,9 +1621,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       })()
     },
     [
-      canUseAgent,
-      contextForSend,
-      contextForSkillSend,
       selection,
       fileText,
       wsUrl,
@@ -1612,8 +1631,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       parseFindIntentFallback,
       handleApplyIntentResult,
       pushSystem,
-      proposalTargetFileByPath,
-      effectiveProposalTargetFile,
       activeFile,
       files,
       updateContent,
@@ -1623,6 +1640,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       finishAuditCtx,
       finishOpenCommandAudit,
       finishChannelAudit,
+      emitV1Event,
     ]
   )
 
@@ -1651,30 +1669,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       if (!trimmed) return
 
       if (meta.v1) {
-        let resolvedFile = activeFile
-        if (meta.targetFile) {
-          const target = meta.targetFile.toLowerCase()
-          const matched = useFileStore
-            .getState()
-            .files.find((f) => f.name.toLowerCase() === target)
-          if (!matched) {
-            void emitV1Event({
-              type: 'claw_editor.v1.commit_response',
-              request_id: meta.v1.requestId,
-              context: meta.v1.context,
-              payload: {
-                action: 'ignore',
-                ok: false,
-                message: `文件「${meta.targetFile}」未在编辑器中打开`,
-              },
-            })
-            return
-          }
-          resolvedFile = matched
-          if (resolvedFile.id !== activeFile?.id) {
-            useFileStore.getState().setActiveFileId(resolvedFile.id)
-          }
-        }
         pushUser(`[Channel] ${trimmed}`)
         processCommand(trimmed, {
           origin: 'remote',
@@ -2135,50 +2129,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     setStaleWarning(false)
   }, [pendingProposal, clearProposal, sendCommandStatus, finishOpenCommandAudit, finishChannelAudit])
 
-  // claw_editor.v1: emit diff to Channel via gateway plugin outbound.
-  useEffect(() => {
-    const proposal = pendingProposal
-    if (!proposal?.remoteV1Context) return
-    if (emittedV1DiffRef.current === proposal.requestId) return
-
-    const ctx = proposal.remoteV1Context
-    const fileName = effectiveProposalTargetFile?.name ?? 'unknown'
-    const before = proposalFileText
-    const after = proposal.newText
-
-    if (before === after) {
-      void emitV1Event({
-        type: 'claw_editor.v1.commit_response',
-        request_id: proposal.requestId,
-        context: ctx,
-        payload: {
-          action: 'ignore',
-          ok: true,
-          message: '命令未产生修改',
-        },
-      })
-      clearProposal(proposal.requestId)
-      if (proposal.correlationId) {
-        finishChannelAudit(proposal.correlationId, 'completed', 'no_document_change')
-      }
-      emittedV1DiffRef.current = proposal.requestId
-      return
-    }
-
-    const diffText = generateUnifiedDiff(before, after, fileName)
-    void emitV1Event({
-      type: 'claw_editor.v1.diff_response',
-      request_id: proposal.requestId,
-      context: ctx,
-      payload: {
-        summary: `修改建议 (${fileName})`,
-        diff_text: diffText,
-        file_name: fileName,
-      },
-    })
-    emittedV1DiffRef.current = proposal.requestId
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingProposal?.requestId, pendingProposal?.remoteV1Context, pendingProposal?.newText])
+  // claw_editor.v1 diff → Channel: see agentStore.setPendingProposal + tryEmitV1DiffForProposal (by request_id).
 
   // Legacy remote (chat.send): session-key based diff — keep for non-v1 paths.
   useEffect(() => {
