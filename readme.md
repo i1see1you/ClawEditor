@@ -1,5 +1,11 @@
 ClawEditor 是一款基于 OpenClaw 与 Tauri 构建的 AI 驱动型轻量级跨平台文本编辑器。所有的编辑操作都需要用户先确认 diff，然后再应用修改。一个编辑命令就是一个 skill，支持用户自定义 skill。
 
+# 本地和channel端效果预览图
+<img width="1088" height="2400" alt="image" src="https://github.com/user-attachments/assets/ee9619d9-511b-4c41-9ed6-34a388893cd2" />
+
+<img width="2934" height="1860" alt="image" src="https://github.com/user-attachments/assets/7b315424-c924-4b1f-9711-85a85ae61867" />
+
+
 # 技术栈
 
 - **桌面框架**：Tauri 2.x（Rust 后端）
