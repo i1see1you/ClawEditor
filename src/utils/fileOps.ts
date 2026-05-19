@@ -1,6 +1,7 @@
 import { open, save, message, confirm } from '@tauri-apps/plugin-dialog'
 import { readTextFile, readFile, stat } from '@tauri-apps/plugin-fs'
-import type { FileHandle } from '../types'
+import type { FileHandle, FileTab } from '../types'
+import { useFileStore } from '../store/fileStore'
 
 function decodeRtfToText(rtfContent: string): string {
   let result = rtfContent
@@ -139,7 +140,111 @@ export async function notify(options: {
   }
 }
 
-/** Ok/Cancel: export only the first `maxLines` lines. Returns false on cancel or dialog error. */
+/** Text tabs with unsaved edits that can be written to disk. */
+export function getModifiedSavableFiles(files: FileTab[]): FileTab[] {
+  return files.filter(
+    (f) =>
+      f.isModified &&
+      !f.isPdf &&
+      typeof f.content === 'string' &&
+      Boolean(f.path)
+  )
+}
+
+export type UnsavedChangesChoice = 'save' | 'discard' | 'cancel'
+
+export type UnsavedPromptContext = 'quit' | 'closeTab'
+
+/** Save / Don't save / Cancel for unsaved files (quit or close tab). */
+export async function promptUnsavedChanges(
+  fileNames: string[],
+  context: UnsavedPromptContext = 'quit'
+): Promise<UnsavedChangesChoice> {
+  if (fileNames.length === 0) return 'discard'
+
+  const list =
+    fileNames.length <= 5
+      ? fileNames.map((n) => `· ${n}`).join('\n')
+      : `${fileNames
+          .slice(0, 5)
+          .map((n) => `· ${n}`)
+          .join('\n')}\n… 另有 ${fileNames.length - 5} 个文件`
+
+  const body =
+    fileNames.length === 1
+      ? context === 'closeTab'
+        ? `「${fileNames[0]}」有未保存的更改。关闭标签页前是否保存？`
+        : `「${fileNames[0]}」有未保存的更改。是否在退出前保存？`
+      : context === 'closeTab'
+        ? `以下 ${fileNames.length} 个文件有未保存的更改：\n\n${list}\n\n关闭前是否保存？`
+        : `以下 ${fileNames.length} 个文件有未保存的更改：\n\n${list}\n\n是否在退出前保存？`
+
+  const buttons = { yes: '保存', no: '不保存', cancel: '取消' } as const
+  try {
+    const result = await message(body, {
+      title: '未保存的更改',
+      kind: 'warning',
+      buttons,
+    })
+    // Custom button labels are returned as-is (not 'Yes' / 'No' / 'Cancel').
+    if (result === buttons.yes) return 'save'
+    if (result === buttons.no) return 'discard'
+    return 'cancel'
+  } catch (err) {
+    console.error('Failed to show unsaved changes dialog:', err)
+    return 'cancel'
+  }
+}
+
+export async function promptQuitWithUnsaved(fileNames: string[]): Promise<UnsavedChangesChoice> {
+  return promptUnsavedChanges(fileNames, 'quit')
+}
+
+/** Persist all given modified tabs; updates file store on success. */
+export async function saveAllModifiedFiles(
+  files: FileTab[],
+  opts?: { cancelAction?: string }
+): Promise<boolean> {
+  const cancelAction = opts?.cancelAction ?? '退出'
+  const store = useFileStore.getState()
+  for (const file of files) {
+    if (typeof file.content !== 'string' || !file.path) continue
+    const ok = await saveFile(file.path, file.content)
+    if (!ok) {
+      await notify({
+        title: '保存失败',
+        message: `无法保存「${file.name}」，已取消${cancelAction}。`,
+        kind: 'error',
+      })
+      return false
+    }
+    store.setSavedContent(file.id, file.content)
+    store.markModified(file.id, false)
+    const baseline = await getFileDiskBaseline(file.path)
+    if (baseline) store.setDiskBaseline(file.id, baseline.mtimeMs, baseline.size)
+  }
+  return true
+}
+
+/** Close a tab after optional save prompt when it has unsaved edits. */
+export async function confirmCloseTab(tabId: string): Promise<void> {
+  const store = useFileStore.getState()
+  const file = store.files.find((f) => f.id === tabId)
+  if (!file) return
+
+  const modified = getModifiedSavableFiles([file])
+  if (modified.length > 0) {
+    const choice = await promptUnsavedChanges([file.name], 'closeTab')
+    if (choice === 'cancel') return
+    if (choice === 'save') {
+      const ok = await saveAllModifiedFiles(modified, { cancelAction: '关闭标签页' })
+      if (!ok) return
+    }
+  }
+
+  useFileStore.getState().removeFile(tabId)
+}
+
 export async function confirmTruncatedPdfExport(options: {
   totalLines: number
   maxLines: number

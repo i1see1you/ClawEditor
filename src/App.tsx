@@ -33,10 +33,12 @@ import {
   saveBinaryFile,
   saveFile,
   getFileDiskBaseline,
+  confirmCloseTab,
 } from './utils/fileOps'
 import { exportHtmlToPdfBytes, exportTextToPdfBytes } from './utils/exportPdf'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
+import { useUnsavedCloseGuard } from './hooks/useUnsavedCloseGuard'
 
 const MAX_PDF_EXPORT_LINES = 10_000
 /** Narrow no-break space between digits (same as product copy). */
@@ -60,6 +62,8 @@ function App() {
   const [gotoOpen, setGotoOpen] = useState(false)
   const [gotoLineOpen, setGotoLineOpen] = useState(false)
   const pendingGotoLineRef = useRef<{ targetId: string; line: number } | null>(null)
+
+  useUnsavedCloseGuard()
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
@@ -330,6 +334,10 @@ function App() {
     }
   }, [activeFileId, externalConflictFileId])
 
+  const handleTabClose = useCallback((id: string) => {
+    void confirmCloseTab(id)
+  }, [])
+
   const handleSaveFile = async () => {
     if (!activeFile) return
     if (isPdf) return
@@ -516,7 +524,7 @@ function App() {
         files={files}
         activeFileId={activeFileId}
         onTabClick={setActiveFileId}
-        onTabClose={(id) => useFileStore.getState().removeFile(id)}
+        onTabClose={handleTabClose}
       />
       <div className="main-workspace">
         <div className="editor-area">

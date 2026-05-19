@@ -12,8 +12,11 @@
     "fs:allow-write-file",
     "fs:allow-stat",
     "dialog:default",
+    "dialog:allow-message",
     "dialog:allow-confirm",
     "dialog:allow-open",
-    "dialog:allow-save"
+    "dialog:allow-save",
+    "core:window:allow-close",
+    "core:window:allow-destroy"
   ]
 }
