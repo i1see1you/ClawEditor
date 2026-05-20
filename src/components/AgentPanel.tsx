@@ -5,6 +5,7 @@ import { selectionProposalFieldsFromReplaceSelectionIntent } from '../utils/pend
 import {
   useAgentStore,
   hashContent,
+  isChannelV1Proposal,
   enqueueRemoteIntentPipeline,
   discardRemoteIntentPipelineByCorrelation,
 } from '../store/agentStore'
@@ -44,7 +45,6 @@ import {
   newAuditCorrelationId,
   type AuditFinishedOutcome,
 } from '../utils/auditLog'
-import { generateUnifiedDiff } from '../openclaw/unifiedDiff'
 
 /** In-flight slash / remote command audit row (paired accepted → finished). */
 type CommandAuditContext = {
@@ -142,8 +142,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   const [commandHistory, setCommandHistory] = useState<string[]>([])
   const chatLogRef = useRef<HTMLDivElement>(null)
   const [actionModal, setActionModal] = useState<ActionModalState>({ kind: 'none' })
-  /** In-flight Channel command audits keyed by `correlationId` (parallel pipelines). */
-  const inFlightChannelAuditsRef = useRef(new Map<string, CommandAuditContext>())
   /** Matches `accepted` NDJSON row until `finished` for local (non-Channel) commands. */
   const inFlightAuditRef = useRef<CommandAuditContext | null>(null)
 
@@ -175,12 +173,24 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
   const finishChannelAudit = useCallback(
     (correlationId: string | undefined, outcome: AuditFinishedOutcome, reason?: string) => {
       if (!correlationId) return
-      const ctx = inFlightChannelAuditsRef.current.get(correlationId)
-      if (!ctx) return
-      finishAuditCtx(ctx, outcome, reason)
-      inFlightChannelAuditsRef.current.delete(correlationId)
+      const proposal = useAgentStore.getState().pendingProposals.get(correlationId)
+      void appendAuditLog({
+        event: 'finished',
+        correlationId,
+        requestId: correlationId,
+        source: 'channel',
+        command: proposal?.originalCommand ?? '',
+        channel: proposal?.channel,
+        sessionKey: proposal?.sessionKey,
+        deliveryId: proposal?.deliveryId,
+        file: proposal?.fileName,
+        fileId: proposal?.fileId,
+        outcome,
+        reason,
+        durationMs: proposal ? Date.now() - proposal.proposalCreatedAt : undefined,
+      })
     },
-    [finishAuditCtx]
+    []
   )
 
   const finishOpenCommandAudit = useCallback(
@@ -596,14 +606,12 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               newText: result.newText,
               title: result.title,
               summary: result.summary,
-              remoteSessionKey: remoteCtx?.sessionKey,
               sessionKey: remoteCtx?.sessionKey,
               channel: remoteCtx?.channel,
               deliveryId: remoteCtx?.deliveryId,
               baseContentHash: cmdHash,
               originalCommand: cmdOrig ?? remoteCtx?.originalCommand,
               correlationId: cmdCorrId ?? remoteCtx?.correlationId,
-              remotePipelineStartMs: remoteCtx?.pipelineStartMs,
               remoteV1Context: remoteCtx?.v1Context,
               proposalCreatedAt: Date.now(),
             })
@@ -757,7 +765,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             // No arg: find most recently created proposal for this channel
             let best: import('../store/agentStore').PendingProposal | null = null
             for (const p of proposals.values()) {
-              if (p.remoteSessionKey && (!metaChannel || p.channel === metaChannel)) {
+              if (isChannelV1Proposal(p) && (!metaChannel || p.channel === metaChannel)) {
                 if (!best || p.proposalCreatedAt > best.proposalCreatedAt) best = p
               }
             }
@@ -830,9 +838,13 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               markModified(targetId, true)
               clearProposal(proposal.requestId)
               pushSystem(ansiMsg('\x1b[32m修改已应用\x1b[0m'))
-              if (metaSessionKey) {
-                const durationMs = Date.now() - proposal.proposalCreatedAt
-                sendCommandStatus(metaSessionKey, `[ClawEditor] ${proposal.originalCommand ?? trimmed} → completed (${durationMs}ms)`)
+              if (proposal.remoteV1Context) {
+                void emitV1Event({
+                  type: 'claw_editor.v1.commit_response',
+                  request_id: proposal.requestId,
+                  context: proposal.remoteV1Context,
+                  payload: { action: 'apply', ok: true },
+                })
               }
               writeConfirmCancelAudit(proposal, 'completed')
               if (proposal.correlationId) finishChannelAudit(proposal.correlationId, 'completed')
@@ -855,9 +867,13 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               return
             }
             const proposal = pp
-            if (metaSessionKey) {
-              const durationMs = Date.now() - proposal.proposalCreatedAt
-              sendCommandStatus(metaSessionKey, `[ClawEditor] ${proposal.originalCommand ?? trimmed} → failed: user cancelled (${durationMs}ms)`)
+            if (proposal.remoteV1Context) {
+              void emitV1Event({
+                type: 'claw_editor.v1.commit_response',
+                request_id: proposal.requestId,
+                context: proposal.remoteV1Context,
+                payload: { action: 'ignore', ok: true },
+              })
             }
             clearProposal(proposal.requestId)
             writeConfirmCancelAudit(proposal, 'failed', 'user_cancelled')
@@ -962,9 +978,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         auditSnap = null
       }
 
-      if (origin === 'remote') {
-        auditSnap = meta?.correlationId ? inFlightChannelAuditsRef.current.get(meta.correlationId) ?? null : null
-      } else {
+      if (origin !== 'remote') {
         const correlationId = newAuditCorrelationId()
         auditSnap = {
           correlationId,
@@ -1370,7 +1384,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             fileId: commandFile.id,
             filePath: commandFile.path,
             fileName: commandFile.name,
-            remoteSessionKey: remoteSnap?.sessionKey,
             sessionKey: remoteSnap?.sessionKey,
             channel: remoteSnap?.channel,
             deliveryId: origin === 'remote' ? remoteSnap?.deliveryId : undefined,
@@ -1378,7 +1391,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             baseContentHash: hashContent(commandFileText),
             originalCommand: trimmed,
             correlationId: cmdCorrelationId,
-            remotePipelineStartMs: remoteSnap?.pipelineStartMs,
             proposalCreatedAt: Date.now(),
             ...selDiff,
           })
@@ -1451,14 +1463,12 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               fileId: commandFile.id,
               filePath: commandFile.path,
               fileName: commandFile.name,
-              remoteSessionKey: remoteSnap?.sessionKey,
               sessionKey: remoteSnap?.sessionKey,
               channel: remoteSnap?.channel,
               deliveryId: origin === 'remote' ? remoteSnap?.deliveryId : undefined,
               baseContentHash: hashContent(commandFileText),
               originalCommand: trimmed,
               correlationId: cmdCorrelationId,
-              remotePipelineStartMs: remoteSnap?.pipelineStartMs,
               remoteV1Context: remoteSnap?.v1Context,
               proposalCreatedAt: Date.now(),
               ...clipSelDiff,
@@ -1538,14 +1548,12 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                   fileId: commandFile.id,
                   filePath: commandFile.path,
                   fileName: commandFile.name,
-                  remoteSessionKey: remoteSnap?.sessionKey,
                   sessionKey: remoteSnap?.sessionKey,
                   channel: remoteSnap?.channel,
                   deliveryId: origin === 'remote' ? remoteSnap?.deliveryId : undefined,
                   baseContentHash: pm ? pm.baseContentHash : hashContent(commandFileText),
                   originalCommand: trimmed,
                   correlationId: cmdCorrelationId,
-                  remotePipelineStartMs: remoteSnap?.pipelineStartMs,
                   remoteV1Context: remoteSnap?.v1Context,
                   proposalCreatedAt: Date.now(),
                   ...(intentSel ?? {}),
@@ -1668,121 +1676,68 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       const trimmed = line.trim()
       if (!trimmed) return
 
-      if (meta.v1) {
-        pushUser(`[Channel] ${trimmed}`)
-        processCommand(trimmed, {
-          origin: 'remote',
-          meta: {
-            v1: meta.v1,
-            targetFile: meta.targetFile,
-            correlationId: meta.v1.requestId,
-          },
-        })
+      if (!meta.v1) {
+        pushSystem(
+          ansiMsg(
+            '\x1b[33m收到非 v1 远程命令，已忽略。请使用 claweditor-gateway 插件（claw_editor.v1）。\x1b[0m'
+          )
+        )
         return
       }
 
-      const auditReject = (reason: string) => {
-        const correlationId = meta.deliveryId ?? newAuditCorrelationId()
-        void appendAuditLog({
-          event: 'finished',
-          correlationId,
-          source: 'channel',
-          command: trimmed,
-          channel: meta.channel,
-          sessionKey: meta.sessionKey,
-          deliveryId: meta.deliveryId,
-          outcome: 'rejected',
-          reason,
-        })
-      }
-
-      if (/^\/(confirm|cancel)\b/i.test(trimmed)) {
-        pushUser(`[Channel] ${trimmed}`)
-        processCommand(trimmed, {
-          origin: 'remote',
-          meta: { channel: meta.channel, sessionKey: meta.sessionKey, deliveryId: meta.deliveryId },
-        })
-        return
-      }
-
-      let resolvedFile = activeFile
       if (meta.targetFile) {
-        const target = meta.targetFile.toLowerCase()
-        const matched = useFileStore
-          .getState()
-          .files.find((f) => f.name.toLowerCase() === target)
-        if (matched) {
-          resolvedFile = matched
-        } else {
-          auditReject('target_file_not_open')
-          if (meta.sessionKey) {
-            sendCommandStatus(
-              meta.sessionKey,
-              `[ClawEditor] ${trimmed} → rejected: 文件「${meta.targetFile}」未在编辑器中打开`
-            )
-          }
+        const matched = findOpenFileByBasename(useFileStore.getState().files, meta.targetFile)
+        if (!matched) {
+          void emitV1Event({
+            type: 'claw_editor.v1.commit_response',
+            request_id: meta.v1.requestId,
+            context: meta.v1.context,
+            payload: {
+              action: 'ignore',
+              ok: false,
+              message: `文件「${meta.targetFile}」未在编辑器中打开`,
+            },
+          })
+          void appendAuditLog({
+            event: 'finished',
+            correlationId: meta.v1.requestId,
+            requestId: meta.v1.requestId,
+            source: 'channel',
+            command: trimmed,
+            channel: meta.channel,
+            outcome: 'rejected',
+            reason: 'target_file_not_open',
+          })
           return
+        }
+        if (matched.id !== activeFile?.id) {
+          useFileStore.getState().setActiveFileId(matched.id)
         }
       }
 
-      const correlationId = meta.deliveryId ?? newAuditCorrelationId()
-      const startedAt = Date.now()
-      const auditCtx: CommandAuditContext = {
-        correlationId,
-        source: 'channel',
-        command: trimmed,
-        startMs: startedAt,
-        channel: meta.channel,
-        sessionKey: meta.sessionKey,
-        deliveryId: meta.deliveryId,
-        fileId: resolvedFile?.id,
-        fileName: resolvedFile?.name,
-      }
-      inFlightChannelAuditsRef.current.set(correlationId, auditCtx)
+      pushUser(`[Channel] ${trimmed}`)
       void appendAuditLog({
         event: 'accepted',
-        correlationId,
+        correlationId: meta.v1.requestId,
+        requestId: meta.v1.requestId,
         source: 'channel',
         command: trimmed,
         channel: meta.channel,
-        sessionKey: meta.sessionKey,
-        deliveryId: meta.deliveryId,
-        file: resolvedFile?.name,
-        fileId: resolvedFile?.id,
+        file: meta.targetFile ?? activeFile?.name,
+        fileId: activeFile?.id,
       })
-
-      if (meta.targetFile && resolvedFile && resolvedFile.id !== activeFile?.id) {
-        useFileStore.getState().setActiveFileId(resolvedFile.id)
-      }
-
-      pushUser(`[Channel] ${trimmed}`)
-
-      if (meta.sessionKey) {
-        const currentFile = resolvedFile?.name ?? activeFile?.name ?? '（无打开文件）'
-        const openFiles = useFileStore.getState().files
-        const fileListPart =
-          openFiles.length > 1
-            ? `\n当前打开的文件：${openFiles.map((f) => (f.name === currentFile ? `**${f.name}**（当前）` : f.name)).join(' · ')}\n如需指定其他文件，可在命令中加 --file <文件名>，例如：${trimmed.replace(/^(\/\w+)/, `$1 --file utils.ts`)}`
-            : ''
-        sendCommandStatus(
-          meta.sessionKey,
-          `[ClawEditor] ${trimmed} → accepted（操作文件：${currentFile}）${fileListPart}`
-        )
-      }
       processCommand(trimmed, {
         origin: 'remote',
         meta: {
-          channel: meta.channel,
-          sessionKey: meta.sessionKey,
-          deliveryId: meta.deliveryId,
+          v1: meta.v1,
           targetFile: meta.targetFile,
-          correlationId,
-          pipelineStartMs: startedAt,
+          channel: meta.channel,
+          correlationId: meta.v1.requestId,
         },
       })
     })
     return () => setRemoteCommandExecutor(null)
-  }, [pushUser, processCommand, sendCommandStatus, emitV1Event, activeFile])
+  }, [pushUser, processCommand, emitV1Event, activeFile, pushSystem])
 
   useEffect(() => {
     setV1CommitExecutor(({ request_id, context, action }) => {
@@ -1853,17 +1808,10 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     pushSystem(ansiMsg(`\x1b[31m${lastError}\x1b[0m`))
     const noProposal = useAgentStore.getState().pendingProposals.size === 0
     if (!noProposal) return
-    for (const ctx of inFlightChannelAuditsRef.current.values()) {
-      finishAuditCtx(ctx, 'failed', lastError)
-      if (ctx.sessionKey) {
-        sendCommandStatus(ctx.sessionKey, `[ClawEditor] ${ctx.command} → failed: ${lastError}`)
-      }
-    }
-    inFlightChannelAuditsRef.current.clear()
     if (inFlightAuditRef.current) {
       finishOpenCommandAudit('failed', lastError)
     }
-  }, [lastError, pushSystem, sendCommandStatus, finishOpenCommandAudit, finishAuditCtx])
+  }, [lastError, pushSystem, finishOpenCommandAudit])
 
   useEffect(() => {
     const el = chatLogRef.current
@@ -1916,13 +1864,11 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
           fileId: payload.fileId,
           filePath: payload.filePath,
           fileName: payload.fileName,
-          remoteSessionKey: payload.remotePipeline?.sessionKey,
           sessionKey: payload.remotePipeline?.sessionKey,
           channel: payload.remotePipeline?.channel,
           deliveryId: payload.remotePipeline?.deliveryId,
           baseContentHash: payload.remotePipeline?.baseContentHash ?? hashContent(baseText),
           correlationId: payload.remotePipeline?.correlationId ?? inFlightAuditRef.current?.correlationId,
-          remotePipelineStartMs: payload.remotePipeline?.pipelineStartMs,
           originalCommand: payload.remotePipeline?.originalCommand,
           remoteV1Context:
             (payload.requestId ? peekV1Request(payload.requestId)?.context : undefined) ??
@@ -2005,12 +1951,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     clearProposal(pendingProposal.requestId)
     setStaleWarning(false)
     pushSystem(ansiMsg('\x1b[32m修改已应用\x1b[0m'))
-    if (pendingProposal.remoteSessionKey && pendingProposal.correlationId) {
-      const durationMs = Date.now() - (pendingProposal.remotePipelineStartMs ?? pendingProposal.proposalCreatedAt)
-      sendCommandStatus(
-        pendingProposal.sessionKey!,
-        `[ClawEditor] ${pendingProposal.originalCommand ?? ''} → completed (${durationMs}ms)`
-      )
+    if (pendingProposal.correlationId && isChannelV1Proposal(pendingProposal)) {
       finishChannelAudit(pendingProposal.correlationId, 'completed')
     } else {
       finishOpenCommandAudit('completed')
@@ -2025,7 +1966,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     markModified,
     clearProposal,
     pushSystem,
-    sendCommandStatus,
     finishOpenCommandAudit,
     finishChannelAudit,
   ])
@@ -2078,12 +2018,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     clearProposal(pendingProposal.requestId)
     setStaleWarning(false)
     pushSystem(ansiMsg('\x1b[32m已应用所选修改\x1b[0m'))
-    if (pendingProposal.remoteSessionKey && pendingProposal.correlationId) {
-      const durationMs = Date.now() - (pendingProposal.remotePipelineStartMs ?? pendingProposal.proposalCreatedAt)
-      sendCommandStatus(
-        pendingProposal.sessionKey!,
-        `[ClawEditor] ${pendingProposal.originalCommand ?? ''} → completed (${durationMs}ms)`
-      )
+    if (pendingProposal.correlationId && isChannelV1Proposal(pendingProposal)) {
       finishChannelAudit(pendingProposal.correlationId, 'completed')
     } else {
       finishOpenCommandAudit('completed')
@@ -2103,7 +2038,6 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     pushSystem,
     finishOpenCommandAudit,
     finishChannelAudit,
-    sendCommandStatus,
   ])
 
   const interactiveSideBySideProposal = Boolean(
@@ -2113,12 +2047,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
 
   /** Wraps clearProposal to also send a 'failed' status back to the Channel. */
   const handleRejectProposal = useCallback(() => {
-    if (pendingProposal?.remoteSessionKey && pendingProposal.correlationId) {
-      const durationMs = Date.now() - (pendingProposal.remotePipelineStartMs ?? pendingProposal.proposalCreatedAt)
-      sendCommandStatus(
-        pendingProposal.sessionKey!,
-        `[ClawEditor] ${pendingProposal.originalCommand ?? ''} → failed: user rejected the proposal (${durationMs}ms)`
-      )
+    if (pendingProposal?.correlationId && isChannelV1Proposal(pendingProposal)) {
       finishChannelAudit(pendingProposal.correlationId, 'failed', 'user_rejected_proposal')
     } else {
       finishOpenCommandAudit('failed', 'user_rejected_proposal')
@@ -2127,42 +2056,9 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       clearProposal(pendingProposal.requestId)
     }
     setStaleWarning(false)
-  }, [pendingProposal, clearProposal, sendCommandStatus, finishOpenCommandAudit, finishChannelAudit])
+  }, [pendingProposal, clearProposal, finishOpenCommandAudit, finishChannelAudit])
 
-  // claw_editor.v1 diff → Channel: see agentStore.setPendingProposal + tryEmitV1DiffForProposal (by request_id).
-
-  // Legacy remote (chat.send): session-key based diff — keep for non-v1 paths.
-  useEffect(() => {
-    const proposal = pendingProposal
-    if (!proposal?.remoteSessionKey || proposal.remoteV1Context) return
-    const sessionKey = proposal.remoteSessionKey
-    const fileName = effectiveProposalTargetFile?.name ?? 'unknown'
-    const before = proposalFileText
-    const after = proposal.newText
-    const command = proposal.originalCommand ?? ''
-
-    if (before === after) {
-      sendCommandStatus(sessionKey, `[ClawEditor] ${command} → 命令未产生修改`)
-      clearProposal(proposal.requestId)
-      if (proposal.correlationId) {
-        finishChannelAudit(proposal.correlationId, 'completed', 'no_document_change')
-      } else {
-        finishOpenCommandAudit('completed', 'no_document_change')
-      }
-      return
-    }
-
-    const diffText = generateUnifiedDiff(before, after, fileName)
-    const msg = [
-      `[ClawEditor] ${command} → diff preview (${fileName}):`,
-      '```diff',
-      diffText,
-      '```',
-      '回复 /confirm 应用修改，/cancel 取消。',
-    ].join('\n')
-    sendCommandStatus(sessionKey, msg)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingProposal?.remoteSessionKey, pendingProposal?.remoteV1Context])
+  // claw_editor.v1 diff → Channel: agentStore.setPendingProposal + tryEmitV1DiffForProposal (by request_id).
 
   const handleConnect = () => {
     if (connection === 'open') {
@@ -2283,8 +2179,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
 
       {pendingProposal &&
       effectiveProposalTargetFile &&
-      !pendingProposal.remoteSessionKey &&
-      !pendingProposal.remoteV1Context ? (
+      !isChannelV1Proposal(pendingProposal) ? (
         <div className="agent-proposal-overlay" role="dialog" aria-modal="true">
           <div className="agent-proposal-card">
             <div className="agent-proposal-title">

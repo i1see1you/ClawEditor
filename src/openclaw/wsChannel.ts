@@ -94,8 +94,6 @@ export class OpenClawWsChannel {
   private suppressToolDiffForRemoteV1 = false
   /** FIFO: correlate tool `diff` final events with the outbound `send()` request id. */
   private intentBindRequestQueue: string[] = []
-  /** Dedupe `claweditor.command` by `deliveryId` from Gateway (FIFO cap). */
-  private deliveredRemoteCommandIds = new Set<string>()
   private url: string
   private manualClose = false
   /**
@@ -1069,7 +1067,6 @@ export class OpenClawWsChannel {
 
     this.rejectIntentParse(new Error('WebSocket 已断开'))
     this.cancelPendingDiffProposal()
-    this.deliveredRemoteCommandIds.clear()
 
     // Reject all pending
     this.pending.forEach(({ reject }) => reject(new Error('WebSocket 已断开')))

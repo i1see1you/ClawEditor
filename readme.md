@@ -93,15 +93,14 @@ openclaw plugins install integrations/openclaw-gateway
 
 # 远程编辑（Channel 端）
 
-已实现。OpenClaw Channel 可通过 Gateway 向 ClawEditor 发送编辑命令：
+已实现。OpenClaw Channel 通过 **claweditor-gateway** 插件与编辑器以 **`claw_editor.v1.*`** 协议协作：
 
-1. Channel 发送 `claweditor.command` 事件至 Gateway
-2. Gateway 转发至 ClawEditor 的 WebSocket 连接
-3. ClawEditor 本地执行命令，生成 diff
-4. diff 结果通过 `sendCommandStatus` 回传给 Channel 供确认
-5. Channel 发送 `/confirm` 或 `/cancel` 完成闭环
+1. Channel 用户发送 `/edit`、`/aiedit` 等业务命令
+2. 插件 `before_dispatch` 转为 `claw_editor.v1.request`（含 `req_*` 流水号与 `context`）并转发给持有远程编辑租约的 ClawEditor
+3. 编辑器执行命令并生成提案；通过 `emitV1Event` 回传 `claw_editor.v1.diff_response`（统一 diff 文本）至 IM
+4. Channel 用户发送 `/confirm req_xxx` 或 `/cancel req_xxx`；插件转为 `claw_editor.v1.commit`，编辑器应用或忽略并回传 `commit_response`
 
-支持 `--file <name>` 参数指定目标文件。命令通过 `requestId` 关联请求与响应，确保多命令并发时结果不错乱。
+支持 `--file <basename>` 指定已打开文件。每条命令以 `request_id` 关联请求、diff 与确认，支持同文件多 pipeline 并发。
 
 
 # 架构决策与约束

@@ -128,15 +128,13 @@ export interface PendingProposal {
   selectionTo?: number
   /** When set, proposal dialog uses interactive side-by-side diff (e.g. /aicorrect). */
   proposalDiffVariant?: 'side_by_side_interactive'
-  /**
-   * When set, this proposal originated from a remote Channel command.
-   * The diff is sent to this session key for confirmation; the editor popup is suppressed.
-   */
-  remoteSessionKey?: string
-  /** claw_editor.v1: emit diff/commit via gateway plugin outbound (no editor popup). */
+  /** claw_editor.v1 Channel: emit diff/commit via gateway plugin outbound (no editor popup). */
   remoteV1Context?: ClawEditorV1Context
-  /** Channel pipeline start (accepted) for duration in status messages. */
-  remotePipelineStartMs?: number
+}
+
+/** Channel-originated proposal (diff goes to IM via v1, not local popup). */
+export function isChannelV1Proposal(p: PendingProposal): boolean {
+  return p.remoteV1Context !== undefined
 }
 
 export interface IncomingParsedIntent {
@@ -479,13 +477,11 @@ function buildOpenClawHandlers(
         ...(diffMode === 'selection' && ctx
           ? { selectionFrom: ctx.selFrom, selectionTo: ctx.selTo }
           : {}),
-        remoteSessionKey: pm?.sessionKey,
         sessionKey: pm?.sessionKey,
         channel: pm?.channel,
         deliveryId: pm?.deliveryId,
         correlationId: pm?.correlationId,
         originalCommand: pm?.originalCommand ?? v1Peek?.originalCommand,
-        remotePipelineStartMs: pm?.pipelineStartMs,
         remoteV1Context: v1Context,
         baseContentHash,
         proposalCreatedAt: Date.now(),
@@ -816,7 +812,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set((s) => {
       const next = new Map(s.pendingProposals)
       for (const [id, p] of next) {
-        if (p.deliveryId !== undefined || p.remoteV1Context !== undefined) {
+        if (p.remoteV1Context !== undefined) {
           const t = proposalTtlTimers.get(id)
           if (t !== undefined) { clearTimeout(t); proposalTtlTimers.delete(id) }
           next.delete(id)
@@ -837,12 +833,17 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   setPendingProposal: (p: PendingProposal) => {
     const state = get()
     if (state.pendingProposals.size >= PROPOSAL_MAX_COUNT) {
-      // Notify Channel if applicable
-      if (p.sessionKey && wsChannel) {
-        void wsChannel.sendCommandStatus(
-          p.sessionKey,
-          '[ClawEditor] 待确认提案过多，请先处理现有提案后再发送命令'
-        )
+      if (p.remoteV1Context) {
+        get().emitV1Event({
+          type: 'claw_editor.v1.commit_response',
+          request_id: p.requestId,
+          context: p.remoteV1Context,
+          payload: {
+            action: 'ignore',
+            ok: false,
+            message: '待确认提案过多，请先处理现有提案后再发送命令',
+          },
+        })
       }
       state.pushSystem('待确认提案已达上限（10 条），请先处理现有提案。')
       return
@@ -852,11 +853,17 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       proposalTtlTimers.delete(p.requestId)
       const current = get().pendingProposals.get(p.requestId)
       if (!current) return
-      if (current.sessionKey && wsChannel) {
-        void wsChannel.sendCommandStatus(
-          current.sessionKey,
-          `[ClawEditor] ${current.originalCommand ?? ''} → 提案已过期（5 分钟未确认）`.trim()
-        )
+      if (current.remoteV1Context) {
+        get().emitV1Event({
+          type: 'claw_editor.v1.commit_response',
+          request_id: p.requestId,
+          context: current.remoteV1Context,
+          payload: {
+            action: 'ignore',
+            ok: true,
+            message: '提案已过期（5 分钟未确认）',
+          },
+        })
       }
       get().clearProposal(p.requestId)
     }, PROPOSAL_TTL_MS)
