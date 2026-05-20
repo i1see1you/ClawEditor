@@ -67,6 +67,11 @@ npm run tauri build
 
 产物位于 `src-tauri/target/release/bundle/`，包含对应平台的安装包。
 
+# 安装openclaw插件
+安装openclaw插件后再启动编辑器的“开启远程编辑”选项就可以支持所有openclaw channel端进行远程文件编辑，安装插件命令如下：
+openclaw plugins install openclaw-gateway
+
+
 # 已实现的 Skill
 
 ## 本地命令（不经过 Gateway）
