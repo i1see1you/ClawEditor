@@ -107,9 +107,13 @@ function applyIntentPipeline(
     const r = applySingleIntentObject(work, stepSelection, st)
     if (r.kind === 'noop') continue
     if (r.kind !== 'edit') {
+      const detail =
+        r.kind === 'error' && typeof r.message === 'string' && r.message.trim()
+          ? r.message.trim()
+          : `得到 ${r.kind}`
       return {
         kind: 'error',
-        message: `管道第 ${i + 1} 步（${op}）未产生可串行的编辑结果（得到 ${r.kind}）。`,
+        message: `管道第 ${i + 1} 步（${op}）未产生可串行的编辑结果，建议使用/aiedit命令重试：${detail}`,
       }
     }
     work = r.newText

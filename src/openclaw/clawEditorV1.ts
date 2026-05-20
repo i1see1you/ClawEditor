@@ -61,6 +61,35 @@ export type ClawEditorV1CommitResponseEvent = {
 
 export type ClawEditorV1OutboundEvent = ClawEditorV1DiffResponseEvent | ClawEditorV1CommitResponseEvent
 
+export const V1_NO_DOCUMENT_CHANGE_MESSAGE = '命令未产生修改'
+
+/** Notify Channel that the edit intent did not change the document (v1 commit_response ignore). */
+export function buildV1NoDocumentChangeResponse(
+  requestId: string,
+  context: ClawEditorV1Context
+): ClawEditorV1CommitResponseEvent {
+  return {
+    type: 'claw_editor.v1.commit_response',
+    request_id: requestId,
+    context,
+    payload: { action: 'ignore', ok: true, message: V1_NO_DOCUMENT_CHANGE_MESSAGE },
+  }
+}
+
+/** Notify Channel that the command failed before a diff proposal (parse/apply errors, etc.). */
+export function buildV1CommandFailedResponse(
+  requestId: string,
+  context: ClawEditorV1Context,
+  message: string
+): ClawEditorV1CommitResponseEvent {
+  return {
+    type: 'claw_editor.v1.commit_response',
+    request_id: requestId,
+    context,
+    payload: { action: 'ignore', ok: false, message },
+  }
+}
+
 function hasChannelId(context: unknown): context is ClawEditorV1Context {
   return (
     context !== null &&

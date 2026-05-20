@@ -34,7 +34,11 @@ import { runSkillCompletions } from '../skills/completionEngine'
 import { getSkillDef, getSkillHelpText } from '../skills/skillRegistry'
 import { getCommandHintText } from '../commands/registry'
 import { peekV1Request, setRemoteCommandExecutor, setV1CommitExecutor } from '../agent/remoteCommandBridge'
-import type { ClawEditorV1Context } from '../openclaw/clawEditorV1'
+import {
+  buildV1CommandFailedResponse,
+  buildV1NoDocumentChangeResponse,
+  type ClawEditorV1Context,
+} from '../openclaw/clawEditorV1'
 import {
   findOpenFileByBasename,
   isAgentEditableFile,
@@ -599,7 +603,16 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         case 'edit':
           if (result.newText === fileText) {
             pushSystem(ansiMsg('\x1b[33m意图未改变文档\x1b[0m'))
-            finishOpenCommandAudit('completed', 'no_document_change')
+            const v1Ctx = remoteCtx?.v1Context
+            const v1ReqId = requestId ?? remoteCtx?.correlationId
+            if (v1Ctx && v1ReqId) {
+              void emitV1Event(buildV1NoDocumentChangeResponse(v1ReqId, v1Ctx))
+            }
+            if (remoteCtx?.correlationId) {
+              finishChannelAudit(remoteCtx.correlationId, 'completed', 'no_document_change')
+            } else {
+              finishOpenCommandAudit('completed', 'no_document_change')
+            }
           } else {
             setPendingProposal({
               requestId: requestId ?? `intent-${Date.now()}`,
@@ -663,13 +676,23 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         case 'noop':
           finishOpenCommandAudit('completed', 'noop')
           break
-        case 'error':
+        case 'error': {
           pushSystem(ansiMsg(`\x1b[31m${result.message}\x1b[0m`))
-          finishOpenCommandAudit('failed', result.message)
+          const v1Ctx = remoteCtx?.v1Context
+          const v1ReqId = requestId ?? remoteCtx?.correlationId
+          if (v1Ctx && v1ReqId) {
+            void emitV1Event(buildV1CommandFailedResponse(v1ReqId, v1Ctx, result.message))
+          }
+          if (remoteCtx?.correlationId) {
+            finishChannelAudit(remoteCtx.correlationId, 'failed', result.message)
+          } else {
+            finishOpenCommandAudit('failed', result.message)
+          }
           break
+        }
       }
     },
-    [fileText, setPendingProposal, pushSystem, finishOpenCommandAudit, finishChannelAudit]
+    [fileText, setPendingProposal, pushSystem, finishOpenCommandAudit, finishChannelAudit, emitV1Event]
   )
 
   const processCommand = useCallback(
@@ -1092,6 +1115,9 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               } catch (e) {
                 const msg = e instanceof Error ? e.message : String(e)
                 pushSystem(ansiMsg(`\x1b[31m${msg}\x1b[0m`))
+                if (remoteSnap?.v1Context) {
+                  void emitV1Event(buildV1CommandFailedResponse(cmdRequestId, remoteSnap.v1Context, msg))
+                }
                 finish('failed', msg)
               }
             })()
@@ -1358,6 +1384,11 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
       if (localResult.kind === 'error') {
         useAgentStore.setState({ lastError: null })
         pushSystem(ansiMsg(`\x1b[31m${localResult.message}\x1b[0m`))
+        if (remoteSnap?.v1Context) {
+          void emitV1Event(
+            buildV1CommandFailedResponse(cmdRequestId, remoteSnap.v1Context, localResult.message)
+          )
+        }
         finish('failed', localResult.message)
         return
       }
@@ -1365,6 +1396,9 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
         useAgentStore.setState({ lastError: null })
         if (localResult.newText === commandFileText) {
           pushSystem(ansiMsg('\x1b[33m本地命令没有产生变化\x1b[0m'))
+          if (remoteSnap?.v1Context) {
+            void emitV1Event(buildV1NoDocumentChangeResponse(cmdRequestId, remoteSnap.v1Context))
+          }
           finish('completed', 'no_document_change')
         } else {
           const selDiff =
@@ -1534,6 +1568,9 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
             if (r.kind === 'edit') {
               if (r.newText === commandFileText) {
                 pushSystem(ansiMsg('\x1b[33m意图未改变文档\x1b[0m'))
+                if (remoteSnap?.v1Context) {
+                  void emitV1Event(buildV1NoDocumentChangeResponse(cmdRequestId, remoteSnap.v1Context))
+                }
                 finish('completed', 'no_document_change')
               } else {
                 const intentSel = selectionProposalFieldsFromReplaceSelectionIntent(
@@ -1567,11 +1604,21 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
                 }
               }
             } else {
-              handleApplyIntentResult(r, undefined, undefined, undefined, undefined, remoteSnap ?? undefined)
+              handleApplyIntentResult(
+                r,
+                cmdRequestId,
+                undefined,
+                undefined,
+                cmdCorrelationId,
+                remoteSnap ?? undefined
+              )
             }
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
             pushSystem(ansiMsg(`\x1b[31m${msg}\x1b[0m`))
+            if (remoteSnap?.v1Context) {
+              void emitV1Event(buildV1CommandFailedResponse(cmdRequestId, remoteSnap.v1Context, msg))
+            }
             finish('failed', msg)
           }
         })()
@@ -1846,6 +1893,13 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     if (result.kind === 'edit') {
       if (result.newText === baseText) {
         pushSystem(ansiMsg('\x1b[33m意图未改变文档\x1b[0m'))
+        const v1Ctx =
+          (payload.requestId ? peekV1Request(payload.requestId)?.context : undefined) ??
+          payload.remotePipeline?.v1Context
+        const v1ReqId = payload.requestId ?? payload.remotePipeline?.correlationId
+        if (v1Ctx && v1ReqId) {
+          void emitV1Event(buildV1NoDocumentChangeResponse(v1ReqId, v1Ctx))
+        }
         if (payload.remotePipeline?.correlationId) {
           finishChannelAudit(payload.remotePipeline.correlationId, 'completed', 'no_document_change')
         } else {
@@ -1905,6 +1959,9 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
               correlationId: payload.remotePipeline.correlationId,
               pipelineStartMs: payload.remotePipeline.pipelineStartMs,
               originalCommand: payload.remotePipeline.originalCommand,
+              v1Context:
+                (payload.requestId ? peekV1Request(payload.requestId)?.context : undefined) ??
+                payload.remotePipeline.v1Context,
             }
           : undefined
       )
@@ -1922,6 +1979,7 @@ export function AgentPanel({ activeFile, height }: AgentPanelProps) {
     handleApplyIntentResult,
     finishOpenCommandAudit,
     finishChannelAudit,
+    emitV1Event,
   ])
 
   const [staleWarning, setStaleWarning] = useState(false)
