@@ -2,6 +2,10 @@ ClawEditor 是一款基于 OpenClaw 与 Tauri 构建的 AI 驱动型轻量级跨
 
 **Languages:** [English](README.md) · 中文（当前）
 
+[![npm @claweditor/cli](https://img.shields.io/npm/v/@claweditor/cli?label=%40claweditor%2Fcli)](https://www.npmjs.com/package/@claweditor/cli)
+
+**快速安装：** `npm install -g @claweditor/cli && claw-editor`
+
 # 本地和 Channel 端效果预览
 
 <img width="2934" height="1860" alt="image" src="https://github.com/user-attachments/assets/7b315424-c924-4b1f-9711-85a85ae61867" />
@@ -35,7 +39,11 @@ Agent 面板采用聊天式 UI（非 xterm.js 终端），支持角色区分（u
 
 # 安装（普通用户）
 
-推荐使用安装器 CLI，首次运行会自动从 GitHub Releases 下载对应平台的安装包：
+## 桌面端 — [`@claweditor/cli`](https://www.npmjs.com/package/@claweditor/cli)（npm 已发布）
+
+全局安装启动器后运行 `claw-editor`；**首次启动**会从 [GitHub Releases](https://github.com/i1see1you/ClawEditor/releases) 下载对应平台的安装包。
+
+**环境要求：** Node.js ≥ 18 · GitHub 上已有适用于你系统/架构的 Release 安装包
 
 ```bash
 npm install -g @claweditor/cli
@@ -45,13 +53,26 @@ claw-editor
 其他命令：
 
 ```bash
-claw-editor install          # 仅安装
+claw-editor install          # 仅安装（不启动）
 claw-editor update           # 重新下载最新版
 claw-editor install --tag 0.1.0
 claw-editor version
 ```
 
-也可手动下载：[GitHub Releases](https://github.com/i1see1you/ClawEditor/releases)
+| 平台 | CLI 自动安装 | 说明 |
+|------|-------------|------|
+| macOS（Apple Silicon / Intel） | `.app.tar.gz` | 全自动 |
+| Linux x64 | `.AppImage` | 全自动 |
+| Windows x64 | `*-setup.exe` | 首次会弹出安装向导，完成后再次运行 `claw-editor` |
+
+也可手动下载安装包：[GitHub Releases](https://github.com/i1see1you/ClawEditor/releases)
+
+## npm 包
+
+| 包名 | 状态 | 用途 |
+|------|------|------|
+| [`@claweditor/cli`](https://www.npmjs.com/package/@claweditor/cli) | **已发布**（v0.1.0） | 安装并启动桌面端 |
+| `@claweditor/openclaw-gateway-bridge` | 尚未发布 | OpenClaw Gateway 插件 — 见下方仓库路径安装 |
 
 # 从源码构建（开发者）
 
@@ -94,10 +115,10 @@ npm run tauri build
 安装插件后，在 ClawEditor Agent 面板勾选 **「开启远程编辑」** 并连接 Gateway，即可接收 Channel 远程命令。
 
 ```bash
-# 从本仓库路径安装（开发）
+# 从本仓库路径安装（当前推荐）
 openclaw plugins install integrations/openclaw-gateway
 
-# 或从 npm 安装（发布后）
+# 待 @claweditor/openclaw-gateway-bridge 发布后：
 # openclaw plugins install @claweditor/openclaw-gateway-bridge
 ```
 
@@ -141,14 +162,45 @@ openclaw plugins install integrations/openclaw-gateway
 
 同一 Gateway 仅一台 ClawEditor 可持有远程编辑租约。每条命令以 `request_id` 关联请求、diff 与确认。
 
-# Virbius 端侧 DLP（数据安全）
+# 自定义 DLP 规则
 
-`/aiedit`、`/aicorrect`、`/aiimport` 等向 Gateway 发送正文前，经 **Virbius Core** 做关键词 scan 与 PII 脱敏；模型返回 JSON 后在本地 **回填** 明文。
+`/aiedit`、`/aicorrect`、`/aiimport` 上云前会按 [`data/virbius/edge/default/ClawEditor/edge-manifest.json`](data/virbius/edge/default/ClawEditor/edge-manifest.json) 做脱敏与关键词拦截。修改该文件后 **重启 ClawEditor** 生效。
 
-- **规则配置**（可编辑）：[`data/virbius/edge/default/ClawEditor/edge-manifest.json`](data/virbius/edge/default/ClawEditor/edge-manifest.json)
-- **默认 App ID**：`ClawEditor`
-- **内置 DLP 实体**：手机号、身份证、邮箱、银行卡（`phone_cn` / `idcard_cn` / `email` / `bank_card_cn`）
-- 修改 manifest 后需 **重启 ClawEditor** 生效
+**拦截关键词** — 在 `rules[]` 中追加：
+
+```json
+{
+  "rule_id": "my_deny",
+  "rule_revision": 1,
+  "reason_code": "EDGE_CUSTOM",
+  "risk_score": 90,
+  "intent_action": "deny",
+  "enforce_mode": "full",
+  "rollout_state": "full",
+  "body": { "list_type": "deny", "keywords": ["internal-only"] }
+}
+```
+
+**脱敏 PII** — 在 `dlp_rules[]` 中追加。内置类型：`phone_cn`、`idcard_cn`、`email`、`bank_card_cn`。自定义正则：
+
+```json
+{
+  "rule_id": "my_dlp_emp",
+  "rule_revision": 1,
+  "reason_code": "DLP_EMP",
+  "risk_score": 0,
+  "intent_action": "allow",
+  "enforce_mode": "full",
+  "rollout_state": "full",
+  "body": {
+    "entity_type": "custom_regex",
+    "pattern": "EMP[0-9]{6}",
+    "mask_template": "{{VIRBIUS_EMP_{seq}}}"
+  }
+}
+```
+
+可复制 manifest 里已有规则，改 `rule_id` 和 `body` 即可；更多示例见该文件。
 
 # 架构决策与约束
 

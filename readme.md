@@ -2,6 +2,10 @@ ClawEditor is a lightweight, cross-platform, AI-assisted text editor built with 
 
 **Languages:** English (this page) · [中文](README.zh-CN.md)
 
+[![npm @claweditor/cli](https://img.shields.io/npm/v/@claweditor/cli?label=%40claweditor%2Fcli)](https://www.npmjs.com/package/@claweditor/cli)
+
+**Quick install:** `npm install -g @claweditor/cli && claw-editor`
+
 # Preview (desktop & Channel)
 
 <img width="2934" height="1860" alt="Desktop preview" src="https://github.com/user-attachments/assets/7b315424-c924-4b1f-9711-85a85ae61867" />
@@ -33,7 +37,11 @@ The Agent panel is a chat UI (not xterm.js): user/assistant/system roles, ANSI c
 
 # Install (end users)
 
-Recommended: install the launcher CLI, then run ClawEditor (downloads the matching GitHub Release on first launch).
+## Desktop app — [`@claweditor/cli`](https://www.npmjs.com/package/@claweditor/cli) (npm)
+
+Install the launcher globally, then run ClawEditor. On first launch the CLI downloads the matching platform bundle from [GitHub Releases](https://github.com/i1see1you/ClawEditor/releases).
+
+**Requirements:** Node.js ≥ 18 · a published GitHub Release for your OS/arch
 
 ```bash
 npm install -g @claweditor/cli
@@ -43,13 +51,26 @@ claw-editor
 Other commands:
 
 ```bash
-claw-editor install          # install only
+claw-editor install          # install only (no launch)
 claw-editor update           # re-download latest release
 claw-editor install --tag 0.1.0
 claw-editor version
 ```
 
-Manual download: [GitHub Releases](https://github.com/i1see1you/ClawEditor/releases)
+| Platform | CLI auto-install | Notes |
+|----------|------------------|-------|
+| macOS (Apple Silicon / Intel) | `.app.tar.gz` | Fully automated |
+| Linux x64 | `.AppImage` | Fully automated |
+| Windows x64 | `*-setup.exe` | Runs the installer UI once, then `claw-editor` |
+
+Prefer a manual installer? Download directly from [GitHub Releases](https://github.com/i1see1you/ClawEditor/releases).
+
+## npm packages
+
+| Package | Status | Purpose |
+|---------|--------|---------|
+| [`@claweditor/cli`](https://www.npmjs.com/package/@claweditor/cli) | **Published** (v0.1.0) | Install & launch desktop app |
+| `@claweditor/openclaw-gateway-bridge` | Not on npm yet | OpenClaw Gateway plugin — use repo path below |
 
 # Build from source (developers)
 
@@ -92,10 +113,10 @@ Artifacts: `src-tauri/target/release/bundle/`.
 Install the plugin, connect ClawEditor to your Gateway, and enable **「开启远程编辑」 / Remote edit receive** in the Agent panel.
 
 ```bash
-# From this repo (development)
+# From this repo (current)
 openclaw plugins install integrations/openclaw-gateway
 
-# From npm (when published)
+# From npm (when @claweditor/openclaw-gateway-bridge is published)
 # openclaw plugins install @claweditor/openclaw-gateway-bridge
 ```
 
@@ -140,14 +161,45 @@ For an **already open** tab, use `--file` with the file basename:
 
 Each command is correlated by `request_id`.
 
-# Virbius edge DLP
+# Custom DLP rules
 
-Before `/aiedit`, `/aicorrect`, `/aiimport` send content to Gateway, **Virbius Core** runs keyword scan and PII masking; model JSON is **restored** locally after the response.
+`/aiedit`, `/aicorrect`, and `/aiimport` mask sensitive data before upload using [`data/virbius/edge/default/ClawEditor/edge-manifest.json`](data/virbius/edge/default/ClawEditor/edge-manifest.json). Edit this file, then **restart ClawEditor**.
 
-- **Editable rules**: [`data/virbius/edge/default/ClawEditor/edge-manifest.json`](data/virbius/edge/default/ClawEditor/edge-manifest.json)
-- **Default app id**: `ClawEditor`
-- **Built-in DLP entities**: phone_cn, idcard_cn, email, bank_card_cn
-- Restart ClawEditor after editing the manifest
+**Block keywords** — add to `rules[]`:
+
+```json
+{
+  "rule_id": "my_deny",
+  "rule_revision": 1,
+  "reason_code": "EDGE_CUSTOM",
+  "risk_score": 90,
+  "intent_action": "deny",
+  "enforce_mode": "full",
+  "rollout_state": "full",
+  "body": { "list_type": "deny", "keywords": ["internal-only"] }
+}
+```
+
+**Mask PII** — add to `dlp_rules[]`. Built-in types: `phone_cn`, `idcard_cn`, `email`, `bank_card_cn`. Custom pattern:
+
+```json
+{
+  "rule_id": "my_dlp_emp",
+  "rule_revision": 1,
+  "reason_code": "DLP_EMP",
+  "risk_score": 0,
+  "intent_action": "allow",
+  "enforce_mode": "full",
+  "rollout_state": "full",
+  "body": {
+    "entity_type": "custom_regex",
+    "pattern": "EMP[0-9]{6}",
+    "mask_template": "{{VIRBIUS_EMP_{seq}}}"
+  }
+}
+```
+
+Copy an existing rule in the manifest and change `rule_id` / `body`. See the bundled file for full examples.
 
 # Design constraints
 
