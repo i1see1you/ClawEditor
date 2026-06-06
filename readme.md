@@ -1,131 +1,161 @@
-ClawEditor 是一款基于 OpenClaw 与 Tauri 构建的 AI 驱动型轻量级跨平台文本编辑器。所有的编辑操作都需要用户先确认 diff，然后再应用修改。一个编辑命令就是一个 skill，支持用户自定义 skill。
+ClawEditor is a lightweight, cross-platform, AI-assisted text editor built with OpenClaw and Tauri. Every edit goes through a diff preview; the user must confirm before changes are applied. Each edit command is a skill; custom skills are supported.
 
-# 本地和channel端效果预览图
+**Languages:** English (this page) · [中文](README.zh-CN.md)
 
-<img width="2934" height="1860" alt="image" src="https://github.com/user-attachments/assets/7b315424-c924-4b1f-9711-85a85ae61867" />
+# Preview (desktop & Channel)
 
-<img width="1088" height="2400" alt="image" src="https://github.com/user-attachments/assets/ee9619d9-511b-4c41-9ed6-34a388893cd2" />
+<img width="2934" height="1860" alt="Desktop preview" src="https://github.com/user-attachments/assets/7b315424-c924-4b1f-9711-85a85ae61867" />
 
+<img width="1088" height="2400" alt="Channel preview" src="https://github.com/user-attachments/assets/ee9619d9-511b-4c41-9ed6-34a388893cd2" />
 
-# 技术栈
+# Tech stack
 
-- **桌面框架**：Tauri 2.x（Rust 后端）
-- **前端**：React 18 + TypeScript + Vite
-- **编辑器**：CodeMirror 6
-- **状态管理**：Zustand 5
-- **通信**：WebSocket 长连接至 OpenClaw Gateway
+- **Desktop**: Tauri 2.x (Rust backend)
+- **Frontend**: React 18 + TypeScript + Vite
+- **Editor**: CodeMirror 6
+- **State**: Zustand 5
+- **Transport**: WebSocket to OpenClaw Gateway
+- **Edge DLP**: Virbius Core (scan + desensitize before cloud upload for `/aiedit`, etc.)
 
-# 架构
+# Architecture
 
 ```
-ClawEditor 桌面端（Tauri + React + CodeMirror 6）
-  ├─ 上半部分：CodeMirror 编辑器（内容展示与编辑）
-  └─ 下半部分：Agent 聊天面板（命令输入 + 消息输出）
-            ↓
-            ↓  WebSocket（充当 OpenClaw Channel 端）
-            ↓
-OpenClaw Gateway（插件系统）
+ClawEditor (Tauri + React + CodeMirror 6)
+  ├─ Top: CodeMirror editor
+  └─ Bottom: Agent chat panel (commands + messages)
+            ↓ WebSocket
+OpenClaw Gateway (claweditor-gateway plugin)
+            ↕
+OpenClaw Channel (IM / Feishu / WeChat, …)
 ```
 
-Agent 面板采用聊天式 UI（非 xterm.js 终端），支持角色区分（user/assistant/system）、ANSI 颜色渲染、流式输出、diff 预览与确认。
+The Agent panel is a chat UI (not xterm.js): user/assistant/system roles, ANSI colors, streaming, diff preview and confirm.
 
-# 安装与运行
+# Install (end users)
 
-## 环境要求
-
-- **Node.js** ≥ 18
-- **Rust** ≥ 1.70（通过 [rustup](https://rustup.rs/) 安装）
-- **Tauri 2 系统依赖**：参考 [Tauri 官方指南](https://v2.tauri.app/start/prerequisites/)
-  - macOS：Xcode Command Line Tools
-  - Windows：Microsoft Visual Studio C++ Build Tools、WebView2
-  - Linux：`libwebkit2gtk-4.1`、`libappindicator3`、`librsvg2` 等
-
-## 安装
+Recommended: install the launcher CLI, then run ClawEditor (downloads the matching GitHub Release on first launch).
 
 ```bash
-# 克隆仓库
+npm install -g @claweditor/cli
+claw-editor
+```
+
+Other commands:
+
+```bash
+claw-editor install          # install only
+claw-editor update           # re-download latest release
+claw-editor install --tag 0.1.0
+claw-editor version
+```
+
+Manual download: [GitHub Releases](https://github.com/i1see1you/ClawEditor/releases)
+
+# Build from source (developers)
+
+## Requirements
+
+- **Node.js** ≥ 18
+- **Rust** ≥ 1.70 ([rustup](https://rustup.rs/))
+- **VirbiusLLM** as a sibling repo: `../VirbiusLLM/virbius-core` (required for Tauri build / edge DLP)
+- **Tauri 2 system deps**: [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
+  - macOS: Xcode Command Line Tools
+  - Windows: MSVC Build Tools, WebView2
+  - Linux: `libwebkit2gtk-4.1`, `libappindicator3`, `librsvg2`, etc.
+
+## Setup
+
+```bash
 git clone https://github.com/i1see1you/ClawEditor.git
 cd ClawEditor
-
-# 安装前端依赖
 npm install
 ```
 
-## 开发模式
+## Development
 
 ```bash
 npm run tauri dev
 ```
 
-启动后会同时运行 Vite 开发服务器（`localhost:1420`）和 Tauri 桌面窗口，支持热重载。
+Starts Vite on `localhost:1420` and the Tauri window with hot reload.
 
-## 构建发行版
+## Release build
 
 ```bash
 npm run tauri build
 ```
 
-产物位于 `src-tauri/target/release/bundle/`，包含对应平台的安装包。
+Artifacts: `src-tauri/target/release/bundle/`.
 
-# 安装openclaw插件
-安装openclaw插件后再启动编辑器的“开启远程编辑”选项就可以支持所有openclaw channel端进行远程文件编辑，安装插件命令如下：<br/>
+# OpenClaw Gateway plugin
+
+Install the plugin, connect ClawEditor to your Gateway, and enable **「开启远程编辑」 / Remote edit receive** in the Agent panel.
+
 ```bash
+# From this repo (development)
 openclaw plugins install integrations/openclaw-gateway
+
+# From npm (when published)
+# openclaw plugins install @claweditor/openclaw-gateway-bridge
 ```
 
-# 已实现的 Skill
+Restart Gateway after install. Only one ClawEditor instance may hold the remote-edit lease per Gateway.
 
-## 本地命令（不经过 Gateway）
+# Skills & commands
 
-- **/edit**：本地编辑命令，利用大模型解析用户自然语言为标准编辑操作（replace、delete、insert、append、行操作、大小写转换等）
-- **/find**：本地查找命令，利用大模型解析用户自然语言为标准查找操作
+## Local (no Gateway)
 
-## Gateway Skill（经由 OpenClaw 大模型处理）
+- **/edit** — local edits; falls back to Gateway for complex natural language
+- **/find** — local find; Gateway fallback for complex queries
 
-- **/aiedit**：利用大模型实现复杂编辑，会将文本内容传给 OpenClaw 底层大模型
-- **/aimport**：利用大模型以 markdown 格式导入文件
-- **/aicorrect**：利用大模型进行拼写纠错和标点符号检查
+## Gateway skills
 
-## 远程命令
+- **/aiedit** — AI-assisted edits (scope text sent to Gateway; masked by Virbius first)
+- **/aiimport** — import from clipboard / files into the buffer
+- **/aicorrect** — spelling & punctuation (interactive side-by-side diff)
 
-- **/confirm**：确认远程提案
-- **/cancel**：拒绝远程提案
+## Remote (Channel)
 
-# 远程编辑（Channel 端）
+Same business commands as above; diff is delivered to the Channel. Confirm/cancel:
 
-已实现。OpenClaw Channel 通过 **claweditor-gateway** 插件与编辑器以 **`claw_editor.v1.*`** 协议协作：
+- **/confirm req_xxx**
+- **/cancel req_xxx**
 
-1. Channel 用户发送 `/edit`、`/aiedit` 等业务命令
-2. 插件 `before_dispatch` 转为 `claw_editor.v1.request`（含 `req_*` 流水号与 `context`）并转发给持有远程编辑租约的 ClawEditor
-3. 编辑器执行命令并生成提案；通过 `emitV1Event` 回传 `claw_editor.v1.diff_response`（统一 diff 文本）至 IM
-4. Channel 用户发送 `/confirm req_xxx` 或 `/cancel req_xxx`；插件转为 `claw_editor.v1.commit`，编辑器应用或忽略并回传 `commit_response`
+### Target file
 
-支持 `--file <basename>` 指定已打开文件。每条命令以 `request_id` 关联请求、diff 与确认，支持同文件多 pipeline 并发。
+For an **already open** tab, use `--file` with the file basename:
 
+```text
+--file bbb.js
+--file=bbb.js
+--file:bbb.js
+```
 
-# 架构决策与约束
+# Remote edit (`claw_editor.v1.*`)
 
-## 1. Channel 传输协议
+1. Channel user sends a command (e.g. `/edit remove blank lines --file=foo.js`)
+2. Plugin emits `claw_editor.v1.request` (`req_*` + `context`) to the ClawEditor lease holder
+3. Editor builds a proposal; local diff UI or `claw_editor.v1.diff_response` to IM
+4. `/confirm req_xxx` or `/cancel req_xxx` → `claw_editor.v1.commit` → `commit_response`
 
-- OpenClaw Channel 与 Gateway 之间采用 WebSocket 长连接。
-- ClawEditor 当前实现为简化 JSON（`type: "request"` 等），与官方 Gateway 的 `req`/`res`/`event` 不一致时，需在服务端或适配层转换。
+Each command is correlated by `request_id`.
 
-## 2. 远程修改与保存（强约束）
+# Virbius edge DLP
 
-- 允许远程发起修改意图；须先 diff 预览 → 用户确认 → 再落盘。
+Before `/aiedit`, `/aicorrect`, `/aiimport` send content to Gateway, **Virbius Core** runs keyword scan and PII masking; model JSON is **restored** locally after the response.
 
-## 3. 协作与同步模型
+- **Editable rules**: [`data/virbius/edge/default/ClawEditor/edge-manifest.json`](data/virbius/edge/default/ClawEditor/edge-manifest.json)
+- **Default app id**: `ClawEditor`
+- **Built-in DLP entities**: phone_cn, idcard_cn, email, bank_card_cn
+- Restart ClawEditor after editing the manifest
 
-- 以 ClawEditor 桌面端为编辑与落盘锚点；不做多用户冲突合并。
+# Design constraints
 
-## 4. 命令行 UI
+- Remote edits require diff → confirm → save
+- ClawEditor desktop is the single source of truth for on-disk content
+- Agent input is not a system shell
+- Operations stay within the workspace; `requestId` aids troubleshooting
 
-- 命令行 UI 不提供系统 shell；区分 OpenClaw 命令与本地轻量文本操作。
+# License
 
-## 5. 本地轻量文件命令
-
-- 查找、替换、删除、添加等在编辑器内确定性执行；若会改磁盘，仍走确认后再保存。
-
-## 6. 安全与范围
-
-- 文件操作限制在工作区内；关键操作带 `requestId` 便于排障。
+[MIT License](LICENSE)

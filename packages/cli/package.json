@@ -1,0 +1,32 @@
+{
+  "name": "@claweditor/cli",
+  "version": "0.1.0",
+  "description": "Install and launch the ClawEditor desktop app from GitHub Releases",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "claw-editor": "bin/claw-editor.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/i1see1you/ClawEditor.git",
+    "directory": "packages/cli"
+  },
+  "keywords": [
+    "claweditor",
+    "tauri",
+    "openclaw",
+    "installer"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -3,6 +3,8 @@ import type { OpenClawAction } from '../openclaw/types'
 import { OpenClawWsChannel } from '../openclaw/wsChannel'
 import { getSkillDef } from '../skills/skillRegistry'
 import { clearV1Request, peekV1Request, runRemoteEditorCommand } from '../agent/remoteCommandBridge'
+import { buildV1CommandFailedResponse } from '../openclaw/clawEditorV1'
+import { partText, virbiusGateInbound, virbiusGateOutbound } from '../virbius/virbiusGate'
 import type { ClawEditorV1Context, ClawEditorV1OutboundEvent } from '../openclaw/clawEditorV1'
 import { clearV1DiffEmitted, tryEmitV1DiffForProposal } from '../openclaw/v1ProposalDiff'
 
@@ -80,6 +82,8 @@ const pendingLocalSkillContext = new Map<
     skillId?: string
     /** When Channel-originated skill/explain shares this outbound id. */
     pipelineMeta?: RemoteIntentPipelineMeta
+    /** Virbius DLP trace for desensitize_out on model JSON. */
+    virbiusTraceId?: string
   }
 >()
 
@@ -342,7 +346,6 @@ function buildOpenClawHandlers(
                   : typeof o.op === 'string'
                     ? o.op
                     : null)
-            const version = typeof o.version === 'number' ? o.version : 1
             if (op) {
               // Bind JSON intent to the correct in-flight skill/explain turn (FIFO when several overlap).
               let boundRequestId: string | undefined
@@ -350,6 +353,7 @@ function buildOpenClawHandlers(
               let boundFilePath: string | undefined
               let boundFileName: string | undefined
               let boundSkillId: string | undefined
+              let boundVirbiusTraceId: string | undefined
               while (skillIntentBindQueue.length > 0 && !boundRequestId) {
                 const cand = skillIntentBindQueue[0]!
                 const ctxPeek = pendingLocalSkillContext.get(cand)
@@ -360,6 +364,7 @@ function buildOpenClawHandlers(
                   boundFilePath = ctx?.filePath
                   boundFileName = ctx?.fileName
                   boundSkillId = ctx?.skillId
+                  boundVirbiusTraceId = ctx?.virbiusTraceId
                   clearEditTimeout(boundRequestId)
                 } else {
                   skillIntentBindQueue.shift()
@@ -372,34 +377,70 @@ function buildOpenClawHandlers(
                 boundFilePath = ctx?.filePath
                 boundFileName = ctx?.fileName
                 boundSkillId = ctx?.skillId
+                boundVirbiusTraceId = ctx?.virbiusTraceId
                 clearEditTimeout(boundRequestId)
               }
               const remotePipeline = takeRemoteIntentPipeline()
-              // Print raw JSON for debugging (command output window).
-              const debugId = nextAgentMessageId('dbg-intent')
-              set((s) => ({
-                suppressAssistantFinalIntentJson: false,
-                streaming: '',
-                messages: [
-                  ...s.messages,
-                  {
-                    id: debugId,
-                    role: 'system' as const,
-                    content: `OpenClaw intent JSON:\n${t}`,
+
+              const publishIntent = (jsonText: string) => {
+                let version = 1
+                let intentPayload: unknown = o
+                try {
+                  const parsed = JSON.parse(jsonText) as Record<string, unknown>
+                  if (parsed && typeof parsed === 'object') {
+                    version = typeof parsed.version === 'number' ? parsed.version : 1
+                    if (Array.isArray(parsed.intent) && parsed.intent.length > 0) {
+                      intentPayload = parsed.intent
+                    } else if (
+                      parsed.intent &&
+                      typeof parsed.intent === 'object' &&
+                      !Array.isArray(parsed.intent)
+                    ) {
+                      intentPayload = parsed.intent
+                    } else {
+                      intentPayload = parsed
+                    }
+                  }
+                } catch {
+                  /* keep envelope from first parse */
+                }
+                const debugId = nextAgentMessageId('dbg-intent')
+                set((s) => ({
+                  suppressAssistantFinalIntentJson: false,
+                  streaming: '',
+                  messages: [
+                    ...s.messages,
+                    {
+                      id: debugId,
+                      role: 'system' as const,
+                      content: `OpenClaw intent JSON:\n${jsonText}`,
+                    },
+                  ],
+                  incomingIntent: {
+                    requestId: boundRequestId,
+                    version,
+                    intent: intentPayload,
+                    fileId: boundFileId,
+                    filePath: boundFilePath,
+                    fileName: boundFileName,
+                    skillId: boundSkillId,
+                    remotePipeline,
                   },
-                ],
-                incomingIntent: {
-                  requestId: boundRequestId,
-                  version,
-                  intent: intentArr ?? intentObj ?? o,
-                  fileId: boundFileId,
-                  filePath: boundFilePath,
-                  fileName: boundFileName,
-                  skillId: boundSkillId,
-                  remotePipeline,
-                },
-              }))
-              if (boundRequestId) pendingLocalSkillContext.delete(boundRequestId)
+                }))
+                if (boundRequestId) pendingLocalSkillContext.delete(boundRequestId)
+              }
+
+              if (boundVirbiusTraceId) {
+                void virbiusGateInbound({
+                  traceId: boundVirbiusTraceId,
+                  content: t,
+                  scene: boundSkillId,
+                }).then((restored) => {
+                  publishIntent(restored?.content ?? t)
+                })
+              } else {
+                publishIntent(t)
+              }
               return
             }
           }
@@ -730,12 +771,59 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           return true
         }
         const hasSel = Boolean(selection && selection.from !== selection.to)
+        let outboundInstruction = instruction
+        let outboundText = text
+        let outboundSelection = selection
+        let virbiusTraceId: string | undefined
+
+        const gate = await virbiusGateOutbound({
+          scene: skillId,
+          parts: [
+            { key: 'instruction', text: instruction },
+            { key: 'document', text: hasSel ? '' : text },
+            { key: 'selection', text: hasSel && selection ? selection.text : '' },
+          ],
+        })
+        if (gate) {
+          if (gate.blocked) {
+            const blockMsg = gate.blockReason ?? 'Virbius 策略拦截'
+            get().pushSystem(`Virbius 已拦截上云内容：${blockMsg}`)
+            const v1Peek = peekV1Request(id)
+            if (v1Peek) {
+              void get().emitV1Event(
+                buildV1CommandFailedResponse(id, v1Peek.context, blockMsg)
+              )
+            }
+            clearEditTimeout(id)
+            removeSkillIntentBindQueueEntry(id)
+            pendingLocalSkillContext.delete(id)
+            set({ lastError: blockMsg })
+            return false
+          }
+          virbiusTraceId = gate.traceId
+          outboundInstruction = partText(gate.parts, 'instruction', instruction)
+          outboundText = partText(gate.parts, 'document', text)
+          if (hasSel && selection) {
+            outboundSelection = {
+              ...selection,
+              text: partText(gate.parts, 'selection', selection.text),
+            }
+          }
+          if (gate.reviewHit) {
+            get().pushSystem('Virbius dry_run 命中（已脱敏上云）')
+          }
+          const ctx = pendingLocalSkillContext.get(id)
+          if (ctx) {
+            pendingLocalSkillContext.set(id, { ...ctx, virbiusTraceId })
+          }
+        }
+
         const shared = {
-          instruction,
+          instruction: outboundInstruction,
           file,
-          text,
+          text: outboundText,
           cursorPos,
-          selection,
+          selection: outboundSelection,
           mode: hasSel ? ('selection' as const) : ('full' as const),
         }
         await c.sendLocalSkillMessage(skillId, shared)

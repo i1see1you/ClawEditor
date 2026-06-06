@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  # Sibling repo checked out next to ClawEditor (matches Cargo path ../../VirbiusLLM)
+  VIRBIUS_REPO: i1see1you/VirbiusLLM
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-aarch64
+            os: macos-latest
+            rust_target: aarch64-apple-darwin
+            arch: aarch64
+          - platform: macos-x64
+            os: macos-13
+            rust_target: x86_64-apple-darwin
+            arch: x64
+          - platform: linux-x64
+            os: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-gnu
+            arch: amd64
+          - platform: windows-x64
+            os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            arch: x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout ClawEditor
+        uses: actions/checkout@v4
+        with:
+          path: ClawEditor
+
+      - name: Checkout VirbiusLLM
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.VIRBIUS_REPO }}
+          path: VirbiusLLM
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ClawEditor/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ClawEditor/src-tauri
+
+      - name: Linux system dependencies
+        if: matrix.platform == 'linux-x64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install frontend dependencies
+        working-directory: ClawEditor
+        run: npm ci
+
+      - name: Generate app icons
+        working-directory: ClawEditor
+        run: npx tauri icon app-icon.svg
+
+      - name: Build Tauri bundles
+        working-directory: ClawEditor
+        run: npm run tauri build -- --target ${{ matrix.rust_target }}
+
+      - name: Package macOS app.tar.gz for CLI
+        if: startsWith(matrix.platform, 'macos-')
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          BUNDLE_DIR="ClawEditor/src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos"
+          APP_PATH=$(find "$BUNDLE_DIR" -maxdepth 1 -name '*.app' -print -quit)
+          if [ -z "$APP_PATH" ]; then
+            echo "No .app bundle found under $BUNDLE_DIR"
+            ls -la "$BUNDLE_DIR" || true
+            exit 1
+          fi
+          OUT="ClawEditor_${VERSION}_${{ matrix.arch }}.app.tar.gz"
+          tar -czf "$BUNDLE_DIR/$OUT" -C "$(dirname "$APP_PATH")" "$(basename "$APP_PATH")"
+
+      - name: Upload bundle artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.platform }}
+          path: |
+            ClawEditor/src-tauri/target/${{ matrix.rust_target }}/release/bundle/**/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all bundle artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: bundle-*
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: dist/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-cli:
+    needs: release
+    runs-on: ubuntu-latest
+    if: ${{ secrets.NPM_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish @claweditor/cli
+        working-directory: packages/cli
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

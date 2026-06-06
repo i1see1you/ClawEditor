@@ -1,0 +1,92 @@
+{
+  "tenant_id": "default",
+  "manifest_version": "1",
+  "app_id": "ClawEditor",
+  "rules": [
+    {
+      "rule_id": "claweditor_deny_jailbreak",
+      "rule_revision": 1,
+      "reason_code": "EDGE_JAILBREAK",
+      "risk_score": 100,
+      "intent_action": "deny",
+      "enforce_mode": "full",
+      "rollout_state": "full",
+      "body": {
+        "list_type": "deny",
+        "keywords": ["jailbreak", "DAN"]
+      }
+    },
+    {
+      "rule_id": "claweditor_dry_run_hint",
+      "rule_revision": 1,
+      "reason_code": "EDGE_DRY_HINT",
+      "risk_score": 80,
+      "intent_action": "deny",
+      "enforce_mode": "dry_run",
+      "rollout_state": "dry_run",
+      "body": {
+        "list_type": "deny",
+        "keywords": ["ignore previous"]
+      }
+    }
+  ],
+  "dlp_rules": [
+    {
+      "rule_id": "claweditor_dlp_phone",
+      "rule_revision": 1,
+      "reason_code": "DLP_PHONE_CN",
+      "risk_score": 0,
+      "intent_action": "allow",
+      "enforce_mode": "full",
+      "rollout_state": "full",
+      "body": {
+        "entity_type": "phone_cn"
+      }
+    },
+    {
+      "rule_id": "claweditor_dlp_idcard",
+      "rule_revision": 1,
+      "reason_code": "DLP_IDCARD_CN",
+      "risk_score": 0,
+      "intent_action": "allow",
+      "enforce_mode": "full",
+      "rollout_state": "full",
+      "body": {
+        "entity_type": "idcard_cn"
+      }
+    },
+    {
+      "rule_id": "claweditor_dlp_email",
+      "rule_revision": 1,
+      "reason_code": "DLP_EMAIL",
+      "risk_score": 0,
+      "intent_action": "allow",
+      "enforce_mode": "full",
+      "rollout_state": "full",
+      "body": {
+        "entity_type": "email"
+      }
+    },
+    {
+      "rule_id": "claweditor_dlp_bank_card",
+      "rule_revision": 1,
+      "reason_code": "DLP_BANK_CARD_CN",
+      "risk_score": 0,
+      "intent_action": "allow",
+      "enforce_mode": "full",
+      "rollout_state": "full",
+      "body": {
+        "entity_type": "bank_card_cn"
+      }
+    }
+  ],
+  "sdk_config": {
+    "dlp_vault_ttl_ms": 300000,
+    "canary_session_key": "device_id"
+  },
+  "lists": {
+    "tenant_id": "default",
+    "deny": { "keywords": ["jailbreak", "DAN", "ignore previous"] },
+    "allow": { "keywords": [] }
+  }
+}

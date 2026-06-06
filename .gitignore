@@ -2,4 +2,4 @@ node_modules/
 dist/
 .DS_Store
 src-tauri/target/
-src-tauri/target/
+packages/cli/node_modules/
