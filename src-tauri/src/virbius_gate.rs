@@ -83,6 +83,8 @@ fn virbius_err(label: &str, err: VirbiusError) -> String {
     match err {
         VirbiusError::EmptyContent => format!("{label}: empty"),
         VirbiusError::InvalidTraceId => format!("{label}: invalid trace_id"),
+        VirbiusError::InvalidInitConfig(msg) => format!("{label}: invalid init config: {msg}"),
+        VirbiusError::InvalidInitJson(msg) => format!("{label}: invalid init JSON: {msg}"),
     }
 }
 
