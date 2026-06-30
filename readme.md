@@ -3,8 +3,21 @@ ClawEditor is a lightweight, cross-platform, AI-assisted text editor built with 
 **Languages:** English (this page) · [中文](README.zh-CN.md)
 
 [![npm @claweditor/cli](https://img.shields.io/npm/v/@claweditor/cli?label=%40claweditor%2Fcli)](https://www.npmjs.com/package/@claweditor/cli)
+[![Release](https://github.com/i1see1you/ClawEditor/actions/workflows/release.yml/badge.svg)](https://github.com/i1see1you/ClawEditor/actions/workflows/release.yml)
 
 **Quick install:** `npm install -g @claweditor/cli && claw-editor`
+
+# Features
+
+- **AI-powered editing** — `/aiedit`, `/aicorrect`, `/aiimport` with diff preview & confirm
+- **Remote editing via IM** — Feishu / WeChat / any OpenClaw Channel
+- **Edge DLP** — sensitive data masked before cloud upload (Virbius Core)
+- **Multi-language syntax highlighting** — JavaScript, Python, CSS, HTML, XML, JSON, Markdown
+- **PDF viewer** — open & preview PDF files in-app
+- **Markdown / HTML preview panel**
+- **Quick file navigation** — Goto Anything (Cmd+P), Goto Line (Cmd+G)
+- **Custom skill system** — write your own commands via `SKILL.md` files
+- **Cross-platform** — macOS (ARM + Intel), Linux, Windows
 
 # Preview (desktop & Channel)
 
@@ -19,6 +32,7 @@ ClawEditor is a lightweight, cross-platform, AI-assisted text editor built with 
 - **Editor**: CodeMirror 6
 - **State**: Zustand 5
 - **Transport**: WebSocket to OpenClaw Gateway
+- **PDF**: pdfjs-dist + jsPDF (view & export)
 - **Edge DLP**: Virbius Core (scan + desensitize before cloud upload for `/aiedit`, etc.)
 
 # Architecture
@@ -123,6 +137,8 @@ openclaw plugins install integrations/openclaw-gateway
 Restart Gateway after install. Only one ClawEditor instance may hold the remote-edit lease per Gateway.
 
 # Skills & commands
+
+Custom skills are defined as `SKILL.md` files in [`skills/`](skills/). See the [skill schema reference](skills/CLAWEDITOR_SKILL_SCHEMA.md) to write your own.
 
 ## Local (no Gateway)
 

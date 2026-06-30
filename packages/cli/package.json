@@ -1,6 +1,6 @@
 {
   "name": "@claweditor/cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Install and launch the ClawEditor desktop app from GitHub Releases",
   "type": "module",
   "license": "MIT",
