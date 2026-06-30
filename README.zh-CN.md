@@ -3,8 +3,21 @@ ClawEditor 是一款基于 OpenClaw 与 Tauri 构建的 AI 驱动型轻量级跨
 **Languages:** [English](README.md) · 中文（当前）
 
 [![npm @claweditor/cli](https://img.shields.io/npm/v/@claweditor/cli?label=%40claweditor%2Fcli)](https://www.npmjs.com/package/@claweditor/cli)
+[![Release](https://github.com/i1see1you/ClawEditor/actions/workflows/release.yml/badge.svg)](https://github.com/i1see1you/ClawEditor/actions/workflows/release.yml)
 
 **快速安装：** `npm install -g @claweditor/cli && claw-editor`
+
+# 功能特性
+
+- **AI 编辑** — `/aiedit`、`/aicorrect`、`/aiimport`，diff 预览确认后落盘
+- **IM 远程编辑** — 飞书 / 微信等 OpenClaw Channel
+- **端侧 DLP** — 上云前敏感数据自动脱敏（Virbius Core）
+- **多语言语法高亮** — JavaScript、Python、CSS、HTML、XML、JSON、Markdown
+- **PDF 预览** — 应用内打开和预览 PDF 文件
+- **Markdown / HTML 预览面板**
+- **快速文件跳转** — Goto Anything（Cmd+P）、跳转到行（Cmd+G）
+- **自定义 Skill 系统** — 通过 `SKILL.md` 文件编写自己的命令
+- **跨平台** — macOS（ARM + Intel）、Linux、Windows
 
 # 本地和 Channel 端效果预览
 
@@ -19,6 +32,7 @@ ClawEditor 是一款基于 OpenClaw 与 Tauri 构建的 AI 驱动型轻量级跨
 - **编辑器**：CodeMirror 6
 - **状态管理**：Zustand 5
 - **通信**：WebSocket 长连接至 OpenClaw Gateway
+- **PDF**：pdfjs-dist + jsPDF（预览与导出）
 - **端侧 DLP**：Virbius Core（`/aiedit` 等上云前 scan + 脱敏）
 
 # 架构
@@ -125,6 +139,8 @@ openclaw plugins install integrations/openclaw-gateway
 安装后需将插件同步到 OpenClaw 扩展目录（若 CLI 未自动完成），并重启 Gateway。
 
 # 已实现的 Skill
+
+自定义 Skill 以 `SKILL.md` 文件定义在 [`skills/`](skills/) 目录下。详见 [Skill schema 参考文档](skills/CLAWEDITOR_SKILL_SCHEMA.md) 编写自己的命令。
 
 ## 本地命令（不经过 Gateway）
 
